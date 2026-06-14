@@ -1,4 +1,4 @@
-/* ── subject.js ── */
+/* ── subject.js (SaaS Cloud-Ready + Robust Markdown Parsing) ── */
 
 const SUBJECT_ID = document.querySelector('.page-subject').dataset.subject;
 let appData      = null;
@@ -13,6 +13,7 @@ let progressChart = null;
 
 const STORAGE_KEY = `flashcards_sm2_${SUBJECT_ID}`;
 
+// ── Renderizado ───────────────────────────────────────────────────────────────
 function renderMarkdown(text) {
   if (!text) return '';
   if (typeof marked !== 'undefined') return marked.parse(text);
@@ -28,9 +29,18 @@ function renderMath() {
         { left: '\\(', right: '\\)', display: false },
         { left: '\\[', right: '\\]', display: true }
       ],
+      // Se elimina 'code' de los ignoredTags para que KaTeX procese fórmulas de la IA
+      ignoredTags: ["script", "noscript", "style", "textarea", "pre"], 
       throwOnError: false
     });
   }
+}
+
+function esc(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 // ── Gestión del Onboarding Drag & Drop ────────────────────────────────────────
@@ -98,7 +108,7 @@ if (btnCloud) {
   });
 }
 
-// ── Tabs ──────────────────────────────────────────────────────────────────────
+// ── Tabs y Carga Inicial ──────────────────────────────────────────────────────
 function switchTab(tabName) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('tab--active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
@@ -130,7 +140,6 @@ function setAnalyzing(active) {
   if (onboardingEl && active) onboardingEl.classList.add('hidden');
 }
 
-// Cargar cache al inicio si existe
 (async () => {
   try {
     const res = await fetch(`/api/cache/${SUBJECT_ID}`);
@@ -153,36 +162,29 @@ function renderAll() {
   renderCheatSheet();
 }
 
-// ── Patterns ──────────────────────────────────────────────────────────────────
+// ── Patrones (Markdown Robusto) ───────────────────────────────────────────────
 function renderPatterns() {
   if (!appData) return;
   const { patterns, study_tips } = appData;
 
   const avgFreq    = Math.round(patterns.reduce((a, p) => a + p.frequency, 0) / patterns.length);
-  const topPattern = patterns.reduce((a, b) => a.frequency > b.frequency ? a : b);
+  const topPattern = patterns.reduce((a, b) => a.frequency > b.frequency ? a : b) || patterns[0];
 
   document.getElementById('patterns-summary').innerHTML = `
-    <div class="summary-card">
-      <div class="summary-card__label">Patrones detectados</div>
-      <div class="summary-card__value" style="color:var(--accent)">${patterns.length}</div>
-    </div>
-    <div class="summary-card">
-      <div class="summary-card__label">Frecuencia media</div>
-      <div class="summary-card__value">${avgFreq}%</div>
-    </div>
-    <div class="summary-card">
-      <div class="summary-card__label">Patrón #1</div>
-      <div class="summary-card__value" style="font-size:1rem;color:var(--green)">${topPattern.title}</div>
-    </div>
-    <div class="summary-card">
-      <div class="summary-card__label">Más frecuente</div>
-      <div class="summary-card__value" style="color:var(--green)">${topPattern.frequency}%</div>
-    </div>`;
+    <div class="summary-card"><div class="summary-card__label">Patrones detectados</div><div class="summary-card__value" style="color:var(--accent)">${patterns.length}</div></div>
+    <div class="summary-card"><div class="summary-card__label">Frecuencia media</div><div class="summary-card__value">${avgFreq}%</div></div>
+    <div class="summary-card"><div class="summary-card__label">Patrón #1</div><div class="summary-card__value" style="font-size:1rem;color:var(--green)">${topPattern.title}</div></div>
+    <div class="summary-card"><div class="summary-card__label">Más frecuente</div><div class="summary-card__value" style="color:var(--green)">${topPattern.frequency}%</div></div>`;
 
   document.getElementById('patterns-list').innerHTML = patterns.map((p, i) => {
     const freqClass = p.frequency >= 70 ? 'high' : p.frequency >= 40 ? 'medium' : 'low';
     const concepts  = (p.key_concepts || []).map(c => `<span class="concept-tag">${esc(c)}</span>`).join('');
-    const mistakes  = (p.common_mistakes || []).map(m => `<li>${esc(m)}</li>`).join('');
+    
+    const desc      = renderMarkdown(p.description || 'Sin descripción detallada.');
+    const howTo     = renderMarkdown(p.how_to_answer || 'No se generó estrategia de respuesta.');
+    const example   = renderMarkdown(p.example_question || 'No se extrajo pregunta de ejemplo.');
+    const mistakes  = (p.common_mistakes || []).map(m => `<li>${renderMarkdown(m)}</li>`).join('');
+
     return `
     <div class="pattern-card">
       <div class="pattern-card__header" onclick="togglePattern(${i})">
@@ -197,40 +199,41 @@ function renderPatterns() {
       <div class="pattern-card__body" id="body-${i}">
         <div class="pattern-section">
           <div class="pattern-section-label">Descripción</div>
-          <div class="pattern-desc">${esc(p.description)}</div>
+          <div class="pattern-desc">${desc}</div>
         </div>
         ${concepts ? `<div class="pattern-section"><div class="pattern-section-label">Conceptos clave</div><div class="concepts-list">${concepts}</div></div>` : ''}
         <div class="pattern-section">
           <div class="pattern-section-label">Cómo responderlo</div>
-          <div class="how-to-box">${esc(p.how_to_answer)}</div>
+          <div class="how-to-box" style="color:var(--text);">${howTo}</div>
         </div>
         ${mistakes ? `<div class="pattern-section"><div class="pattern-section-label">Errores comunes</div><ul class="mistakes-list">${mistakes}</ul></div>` : ''}
         <div class="pattern-section">
           <div class="pattern-section-label">Pregunta típica de examen</div>
-          <div class="example-box">${esc(p.example_question)}</div>
+          <div class="example-box" style="color:var(--text);">${example}</div>
         </div>
       </div>
     </div>`;
   }).join('');
 
   if (study_tips && study_tips.length) {
-    document.getElementById('study-tips').innerHTML = `
-      <div class="study-tips">
-        <h3>Estrategia de estudio</h3>
-        <ul class="tips-list">${study_tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>
-      </div>`;
+    document.getElementById('study-tips').innerHTML = `<div class="study-tips"><h3>Estrategia de estudio</h3><ul class="tips-list">${study_tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`;
   }
   renderMath();
 }
 
-function togglePattern(i) {
+window.togglePattern = function(i) {
   document.getElementById(`body-${i}`).classList.toggle('open');
   document.getElementById(`toggle-${i}`).classList.toggle('open');
 }
 
+// ── Cheat Sheet (Protección de fallback) ──────────────────────────────────────
 function renderCheatSheet() {
-  if (!appData?.cheat_sheet) return;
-  document.getElementById('cheatsheet-content').innerHTML = renderMarkdown(appData.cheat_sheet);
+  const contentEl = document.getElementById('cheatsheet-content');
+  if (!appData || !appData.cheat_sheet) {
+    contentEl.innerHTML = '<div style="text-align:center; padding: 2rem; color: var(--text-2);">El modelo no incluyó la Cheat Sheet en este análisis. Vuelve a analizar los documentos.</div>';
+    return;
+  }
+  contentEl.innerHTML = renderMarkdown(appData.cheat_sheet);
   renderMath();
 }
 
@@ -704,11 +707,4 @@ function renderProgress(stats) {
         </div>`;
     }).join('');
   }
-}
-
-function esc(str) {
-  if (str == null) return '';
-  return String(str)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
