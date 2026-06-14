@@ -268,10 +268,10 @@ Responde ÚNICAMENTE con un objeto JSON válido con esta estructura exacta:
       "key_concepts": ["concepto1", "concepto2", "concepto3"],
       "how_to_answer": "Plantilla paso a paso. Usa $LaTeX$ para fórmulas y bloques de código para algoritmos.",
       "common_mistakes": ["error1", "error2"],
-      "example_question": "Una pregunta de ejemplo típica de examen"
+      "example_question": "Una pregunta de ejemplo típica de examen. (ESTRICTAMENTE OBLIGATORIO)"
     }}
   ],
-  "cheat_sheet": "Resumen Markdown denso con los conceptos clave. Usa $LaTeX$ para fórmulas y bloques de código.",
+  "cheat_sheet": "Resumen Markdown denso con los conceptos clave. Usa $LaTeX$ para fórmulas y bloques de código. (ESTRICTAMENTE OBLIGATORIO: DEBE INCLUIR TEXTO EXTENSO).",
   "study_tips": ["consejo1", "consejo2", "consejo3"]
 }}
 
