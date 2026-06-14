@@ -254,33 +254,43 @@ Analiza estos exámenes históricos y extrae los patrones de preguntas más frec
 EXÁMENES HISTÓRICOS:
 {exam_text[:40000]}
 
-Responde ÚNICAMENTE con un objeto JSON válido con esta estructura exacta:
-
-{{
-  "subject": "{subject_id.upper()}",
-  "patterns": [
-    {{
-      "id": 1,
-      "title": "Nombre corto del patrón",
-      "frequency": 95,
-      "difficulty": "Alta",
-      "description": "Explicación clara de qué evalúa este patrón",
-      "key_concepts": ["concepto1", "concepto2", "concepto3"],
-      "how_to_answer": "Plantilla paso a paso. Usa $LaTeX$ para fórmulas y bloques de código para algoritmos.",
-      "common_mistakes": ["error1", "error2"],
-      "example_question": "Una pregunta de ejemplo típica de examen. (ESTRICTAMENTE OBLIGATORIO)"
-    }}
-  ],
-  "cheat_sheet": "Resumen Markdown denso con los conceptos clave. Usa $LaTeX$ para fórmulas y bloques de código. (ESTRICTAMENTE OBLIGATORIO: DEBE INCLUIR TEXTO EXTENSO).",
-  "study_tips": ["consejo1", "consejo2", "consejo3"]
-}}
-
 Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
 
     try:
         response = client.models.generate_content(
             model=MODEL, contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8000, response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                temperature=0.2, 
+                max_output_tokens=8000, 
+                response_mime_type="application/json",
+                response_schema={
+                    "type": "OBJECT",
+                    "properties": {
+                        "subject": {"type": "STRING"},
+                        "patterns": {
+                            "type": "ARRAY",
+                            "items": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "id": {"type": "INTEGER"},
+                                    "title": {"type": "STRING"},
+                                    "frequency": {"type": "INTEGER"},
+                                    "difficulty": {"type": "STRING"},
+                                    "description": {"type": "STRING"},
+                                    "key_concepts": {"type": "ARRAY", "items": {"type": "STRING"}},
+                                    "how_to_answer": {"type": "STRING"},
+                                    "common_mistakes": {"type": "ARRAY", "items": {"type": "STRING"}},
+                                    "example_question": {"type": "STRING"}
+                                },
+                                "required": ["id", "title", "frequency", "difficulty", "description", "how_to_answer"]
+                            }
+                        },
+                        "cheat_sheet": {"type": "STRING"},
+                        "study_tips": {"type": "ARRAY", "items": {"type": "STRING"}}
+                    },
+                    "required": ["subject", "patterns", "cheat_sheet", "study_tips"]
+                }
+            )
         )
         data = parse_llm_json(response.text)
         save_cache(subject_id, data)
