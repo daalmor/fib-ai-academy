@@ -90,7 +90,9 @@ function closeModal() {
 
 document.getElementById('modal-close').addEventListener('click', closeModal);
 document.getElementById('modal-cancel').addEventListener('click', closeModal);
-document.getElementById('modal-backdrop')?.addEventListener('click', e => {
+
+// FIX: el ID del backdrop es 'modal-new', no 'modal-backdrop'
+document.getElementById('modal-new').addEventListener('click', e => {
   if (e.target.id === 'modal-new') closeModal();
 });
 
@@ -98,18 +100,18 @@ document.getElementById('new-subject-name').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('modal-confirm').click();
 });
 
-// --- LÓGICA DE CREACIÓN DINÁMICA DE PRODUCTO (Fricción Cero) ---
+// --- LÓGICA DE CREACIÓN DE ASIGNATURA ---
 document.getElementById('modal-confirm').addEventListener('click', () => {
   const name = document.getElementById('new-subject-name').value.trim();
   if (!name) return;
-  
+
   const btn = document.getElementById('modal-confirm');
-  btn.disabled = true; 
+  btn.disabled = true;
   btn.textContent = 'Creando...';
-  
-  // Magia PM: En lugar de un POST a una API, redirigimos dinámicamente. 
-  // Si la asignatura no existe, el backend la creará al vuelo.
-  window.location.href = '/subject/' + name.toLowerCase();
+
+  // Navegación directa: el backend crea la asignatura al vuelo si no existe.
+  // NO se espera JSON aquí — es una redirección a una página HTML normal.
+  window.location.href = '/subject/' + encodeURIComponent(name.toLowerCase());
 });
 </script>
 {% endblock %}
