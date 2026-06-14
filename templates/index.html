@@ -50,7 +50,6 @@
 
 </div>
 
-<!-- Modal: nueva asignatura -->
 <div class="modal-backdrop hidden" id="modal-new">
   <div class="modal">
     <div class="modal-header">
@@ -73,6 +72,7 @@
 
 {% block scripts %}
 <script>
+// --- LÓGICA DEL MODAL DE UI ---
 function openModal() {
   document.getElementById('modal-new').classList.remove('hidden');
   document.getElementById('new-subject-name').focus();
@@ -82,10 +82,12 @@ function closeModal() {
   document.getElementById('new-subject-name').value = '';
 }
 
+// Escuchar todos los botones de "Nueva asignatura"
 ['btn-new-subject','btn-new-subject-2','btn-new-subject-3'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('click', e => { e.preventDefault(); openModal(); });
 });
+
 document.getElementById('modal-close').addEventListener('click', closeModal);
 document.getElementById('modal-cancel').addEventListener('click', closeModal);
 document.getElementById('modal-backdrop')?.addEventListener('click', e => {
@@ -96,23 +98,18 @@ document.getElementById('new-subject-name').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('modal-confirm').click();
 });
 
-document.getElementById('modal-confirm').addEventListener('click', async () => {
+// --- LÓGICA DE CREACIÓN DINÁMICA DE PRODUCTO (Fricción Cero) ---
+document.getElementById('modal-confirm').addEventListener('click', () => {
   const name = document.getElementById('new-subject-name').value.trim();
   if (!name) return;
+  
   const btn = document.getElementById('modal-confirm');
-  btn.disabled = true; btn.textContent = 'Creando...';
-  try {
-    const res  = await fetch('/api/subjects', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({name})
-    });
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error);
-    window.location.href = `/subject/${json.id}`;
-  } catch(e) {
-    alert('Error: ' + e.message);
-    btn.disabled = false; btn.textContent = 'Crear';
-  }
+  btn.disabled = true; 
+  btn.textContent = 'Creando...';
+  
+  // Magia PM: En lugar de un POST a una API, redirigimos dinámicamente. 
+  // Si la asignatura no existe, el backend la creará al vuelo.
+  window.location.href = '/subject/' + name.toLowerCase();
 });
 </script>
 {% endblock %}
