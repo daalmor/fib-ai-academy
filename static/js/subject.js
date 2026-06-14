@@ -27,11 +27,15 @@ function setHTML(id, html) { const el = document.getElementById(id); if (el) el.
 function renderMD(text) {
   if (!text) return '';
   let html = '';
-  if (typeof marked !== 'undefined') {
-    html = marked.parse(text);
-  } else {
-    // Fallback: use app.js renderMarkdown if available
-    html = typeof renderMarkdown === 'function' ? renderMarkdown(text) : text;
+  try {
+    if (typeof marked !== 'undefined') {
+      html = marked.parse(String(text));
+    } else {
+      html = typeof renderMarkdown === 'function' ? renderMarkdown(String(text)) : String(text);
+    }
+  } catch (e) {
+    console.error("Markdown render error:", e);
+    html = String(text);
   }
   return html;
 }
@@ -39,13 +43,17 @@ function renderMD(text) {
 /** Re-render KaTeX after injecting HTML */
 function renderKatex(el) {
   if (typeof renderMathInElement === 'function') {
-    renderMathInElement(el, {
-      delimiters: [
-        { left: '$$', right: '$$', display: true },
-        { left: '$', right: '$', display: false },
-      ],
-      throwOnError: false,
-    });
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+        ],
+        throwOnError: false,
+      });
+    } catch (e) {
+      console.warn('KaTeX render error:', e);
+    }
   }
 }
 
@@ -65,7 +73,6 @@ function switchTab(name) {
   if (btn) btn.classList.add('tab--active');
   if (content) content.classList.remove('hidden');
 
-  // Lazy-load progress tab
   if (name === 'progress') loadProgress();
 }
 
@@ -119,7 +126,6 @@ if (analyzeBtn) {
   analyzeBtn.addEventListener('click', async () => {
     if (selectedFiles.length === 0) return;
 
-    // Show analyzing state
     hide('onboarding-state');
     show('analyzing-state');
     analyzeBtn.disabled = true;
@@ -145,7 +151,7 @@ if (analyzeBtn) {
   });
 }
 
-// ─── Load Cache (if subject already analyzed) ─────────────────────────────────
+// ─── Load Cache ───────────────────────────────────────────────────────────────
 
 async function loadCacheIfReady() {
   const mainContent = document.getElementById('main-content');
@@ -162,94 +168,104 @@ async function loadCacheIfReady() {
   }
 }
 
-// ─── Patterns Tab ─────────────────────────────────────────────────────────────
+// ─── Patterns Tab (ANTI-CRASH) ────────────────────────────────────────────────
 
 function renderPatterns(data) {
-  // Set subject name in chat tab
-  setText('chat-subject-name', data.subject || SUBJECT_ID.toUpperCase());
+  try {
+    if (!data) return;
+    setText('chat-subject-name', data.subject || SUBJECT_ID.toUpperCase());
 
-  const patterns = data.patterns || [];
+    const patterns = Array.isArray(data.patterns) ? data.patterns : [];
 
-  // Summary cards
-  const summaryEl = document.getElementById('patterns-summary');
-  if (summaryEl) {
-    summaryEl.innerHTML = `
-      <div class="summary-card">
-        <div class="summary-card__label">Patrones detectados</div>
-        <div class="summary-card__value">${patterns.length}</div>
-      </div>
-      <div class="summary-card">
-        <div class="summary-card__label">Frecuencia media</div>
-        <div class="summary-card__value">${patterns.length ? Math.round(patterns.reduce((s,p)=>s+p.frequency,0)/patterns.length) : 0}%</div>
-      </div>
-      <div class="summary-card">
-        <div class="summary-card__label">Alta dificultad</div>
-        <div class="summary-card__value">${patterns.filter(p=>p.difficulty==='Alta'||p.difficulty==='Difícil').length}</div>
-      </div>
-    `;
-  }
+    // Summary cards
+    const summaryEl = document.getElementById('patterns-summary');
+    if (summaryEl) {
+      const avgFreq = patterns.length ? Math.round(patterns.reduce((s, p) => s + (Number(p.frequency) || 0), 0) / patterns.length) : 0;
+      const hardCount = patterns.filter(p => {
+        const d = String(p.difficulty || '').toLowerCase();
+        return d.includes('alta') || d.includes('difícil') || d.includes('hard') || d.includes('high');
+      }).length;
 
-  // Pattern cards
-  const listEl = document.getElementById('patterns-list');
-  if (listEl) {
-    listEl.innerHTML = patterns.map((p, i) => {
-      const freqClass = p.frequency >= 70 ? 'freq--high' : p.frequency >= 40 ? 'freq--medium' : 'freq--low';
-      const concepts  = (p.key_concepts || []).map(c => `<span class="concept-tag">${c}</span>`).join('');
-      const mistakes  = (p.common_mistakes || []).map(m => `<li>${m}</li>`).join('');
-      return `
-        <div class="pattern-card">
-          <div class="pattern-card__header" onclick="togglePattern(this)">
-            <div class="pattern-card__left">
-              <span class="pattern-num">#${String(i+1).padStart(2,'0')}</span>
-              <span class="pattern-title">${p.title || 'Sin título'}</span>
-            </div>
-            <span class="pattern-freq ${freqClass}">${p.frequency}%</span>
-            <span class="pattern-difficulty">${p.difficulty || ''}</span>
-            <span class="pattern-toggle">▾</span>
-          </div>
-          <div class="pattern-card__body">
-            <div class="pattern-section">
-              <div class="pattern-section-label">Descripción</div>
-              <div class="pattern-desc">${p.description || ''}</div>
-            </div>
-            ${concepts ? `<div class="pattern-section"><div class="pattern-section-label">Conceptos clave</div><div class="concepts-list">${concepts}</div></div>` : ''}
-            ${p.how_to_answer ? `<div class="pattern-section"><div class="pattern-section-label">Cómo responder</div><div class="how-to-box">${p.how_to_answer}</div></div>` : ''}
-            ${mistakes ? `<div class="pattern-section"><div class="pattern-section-label">Errores frecuentes</div><ul class="mistakes-list">${mistakes}</ul></div>` : ''}
-            ${p.example_question ? `<div class="pattern-section"><div class="pattern-section-label">Ejemplo de pregunta</div><div class="example-box">${p.example_question}</div></div>` : ''}
-          </div>
-        </div>
+      summaryEl.innerHTML = `
+        <div class="summary-card"><div class="summary-card__label">Patrones detectados</div><div class="summary-card__value">${patterns.length}</div></div>
+        <div class="summary-card"><div class="summary-card__label">Frecuencia media</div><div class="summary-card__value">${avgFreq}%</div></div>
+        <div class="summary-card"><div class="summary-card__label">Alta dificultad</div><div class="summary-card__value">${hardCount}</div></div>
       `;
-    }).join('');
-
-    // Render math in patterns
-    renderKatex(listEl);
-  }
-
-  // Cheat sheet
-  const cheatEl = document.getElementById('cheatsheet-content');
-  if (cheatEl) {
-    if (data.cheat_sheet && data.cheat_sheet.trim().length > 10) {
-      cheatEl.innerHTML = renderMD(data.cheat_sheet);
-      renderKatex(cheatEl);
-    } else {
-      cheatEl.innerHTML = '<p style="text-align:center; padding: 2.5rem; color: var(--amber);">⚠️ La IA no ha podido generar la Cheat Sheet completa por límite de contexto. Por favor, vuelve a la pestaña de Asignaturas y analiza los documentos de nuevo.</p>';
     }
-  }
 
-  // Study tips
-  const tipsEl = document.getElementById('study-tips');
-  if (tipsEl) {
-    if (data.study_tips && data.study_tips.length > 0) {
-      tipsEl.style.display = 'block';
-      tipsEl.innerHTML = `
-        <h3>Consejos de estudio</h3>
-        <ul class="tips-list">
-          ${data.study_tips.map(t => `<li>${t}</li>`).join('')}
-        </ul>
-      `;
-    } else {
-      tipsEl.style.display = 'none';
+    // Pattern cards
+    const listEl = document.getElementById('patterns-list');
+    if (listEl) {
+      listEl.innerHTML = patterns.map((p, i) => {
+        const freq = Number(p.frequency) || 0;
+        const freqClass = freq >= 70 ? 'freq--high' : freq >= 40 ? 'freq--medium' : 'freq--low';
+        
+        // Prevención de arrays vacíos o nulos
+        const concepts = Array.isArray(p.key_concepts) ? p.key_concepts.map(c => `<span class="concept-tag">${c}</span>`).join('') : '';
+        const mistakes = Array.isArray(p.common_mistakes) ? p.common_mistakes.map(m => `<li>${renderMD(m)}</li>`).join('') : '';
+
+        // Renderizado seguro (no imprime cajas si el contenido es nulo)
+        const descHTML = renderMD(p.description);
+        const howToHTML = renderMD(p.how_to_answer);
+        const exampleHTML = renderMD(p.example_question);
+
+        return `
+          <div class="pattern-card">
+            <div class="pattern-card__header" onclick="togglePattern(this)">
+              <div class="pattern-card__left">
+                <span class="pattern-num">#${String(i+1).padStart(2,'0')}</span>
+                <span class="pattern-title">${p.title || 'Sin título'}</span>
+              </div>
+              <span class="pattern-freq ${freqClass}">${freq}%</span>
+              <span class="pattern-difficulty">${p.difficulty || ''}</span>
+              <span class="pattern-toggle">▾</span>
+            </div>
+            <div class="pattern-card__body">
+              ${descHTML ? `<div class="pattern-section"><div class="pattern-section-label">Descripción</div><div class="pattern-desc">${descHTML}</div></div>` : ''}
+              ${concepts ? `<div class="pattern-section"><div class="pattern-section-label">Conceptos clave</div><div class="concepts-list">${concepts}</div></div>` : ''}
+              ${howToHTML ? `<div class="pattern-section"><div class="pattern-section-label">Cómo responder</div><div class="how-to-box">${howToHTML}</div></div>` : ''}
+              ${mistakes ? `<div class="pattern-section"><div class="pattern-section-label">Errores frecuentes</div><ul class="mistakes-list">${mistakes}</ul></div>` : ''}
+              ${exampleHTML ? `<div class="pattern-section"><div class="pattern-section-label">Ejemplo de pregunta</div><div class="example-box">${exampleHTML}</div></div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      renderKatex(listEl);
     }
+
+    // Cheat sheet
+    const cheatEl = document.getElementById('cheatsheet-content');
+    if (cheatEl) {
+      const cheatText = typeof data.cheat_sheet === 'string' ? data.cheat_sheet : '';
+      if (cheatText.trim().length > 10) {
+        cheatEl.style.display = 'block';
+        cheatEl.innerHTML = renderMD(cheatText);
+        renderKatex(cheatEl);
+      } else {
+        cheatEl.style.display = 'block';
+        cheatEl.innerHTML = '<p style="text-align:center; padding: 2.5rem; color: var(--amber);">⚠️ La IA no ha podido generar la Cheat Sheet completa. Por favor, vuelve a la pantalla inicial y analiza los documentos de nuevo.</p>';
+      }
+    }
+
+    // Study tips
+    const tipsEl = document.getElementById('study-tips');
+    if (tipsEl) {
+      const tips = Array.isArray(data.study_tips) ? data.study_tips : [];
+      if (tips.length > 0) {
+        tipsEl.style.display = 'block';
+        tipsEl.innerHTML = `
+          <h3>Consejos de estudio</h3>
+          <ul class="tips-list">
+            ${tips.map(t => `<li>${renderMD(t)}</li>`).join('')}
+          </ul>
+        `;
+      } else {
+        tipsEl.style.display = 'none'; // Destruye la caja gris si está vacía
+      }
+    }
+
+  } catch (errorFatal) {
+    console.error("Fallo crítico dibujando la interfaz:", errorFatal);
   }
 }
 
@@ -290,11 +306,9 @@ function renderCard() {
   if (!flashcards.length) return;
   const card = flashcards[currentCardIdx];
 
-  // Reset flip
   const inner = document.getElementById('flashcard-inner');
   if (inner) inner.classList.remove('flipped');
 
-  // Content
   const frontEl = document.getElementById('card-front');
   const backEl  = document.getElementById('card-back');
   if (frontEl) { frontEl.innerHTML = renderMD(card.front || ''); renderKatex(frontEl); }
@@ -308,16 +322,13 @@ function renderCard() {
     diffEl.className    = `difficulty-badge diff--${card.difficulty || ''}`;
   }
 
-  // Progress
   setText('cards-progress', `${currentCardIdx + 1} / ${flashcards.length}`);
   const fill = document.getElementById('progress-fill');
   if (fill) fill.style.width = `${((currentCardIdx + 1) / flashcards.length) * 100}%`;
 
-  // Show verdict after flip
   hide('cards-verdict');
 }
 
-// Flip on card click
 const flashcardEl = document.getElementById('flashcard');
 if (flashcardEl) {
   flashcardEl.addEventListener('click', () => {
@@ -329,17 +340,10 @@ if (flashcardEl) {
   });
 }
 
-document.getElementById('btn-card-flip')?.addEventListener('click', () => {
-  flashcardEl?.click();
-});
-document.getElementById('btn-card-prev')?.addEventListener('click', () => {
-  if (currentCardIdx > 0) { currentCardIdx--; renderCard(); }
-});
-document.getElementById('btn-card-next')?.addEventListener('click', () => {
-  if (currentCardIdx < flashcards.length - 1) { currentCardIdx++; renderCard(); }
-});
+document.getElementById('btn-card-flip')?.addEventListener('click', () => { flashcardEl?.click(); });
+document.getElementById('btn-card-prev')?.addEventListener('click', () => { if (currentCardIdx > 0) { currentCardIdx--; renderCard(); } });
+document.getElementById('btn-card-next')?.addEventListener('click', () => { if (currentCardIdx < flashcards.length - 1) { currentCardIdx++; renderCard(); } });
 
-// FIX: rating values must be 'easy'/'medium'/'hard' strings (not numbers)
 async function rateCard(rating) {
   const card = flashcards[currentCardIdx];
   if (!card) return;
@@ -354,12 +358,10 @@ async function rateCard(rating) {
     console.warn('Rating save failed:', err);
   }
 
-  // Advance to next card
   if (currentCardIdx < flashcards.length - 1) {
     currentCardIdx++;
     renderCard();
   } else {
-    // All cards done
     setHTML('flashcards-container', `
       <div style="text-align:center;padding:4rem 2rem;color:var(--text-2)">
         <div style="font-size:3rem;margin-bottom:1rem">🎉</div>
@@ -371,12 +373,10 @@ async function rateCard(rating) {
   }
 }
 
-// Make rateCard global (called from inline onclick in HTML)
 window.rateCard = rateCard;
 
 // ─── Exam ─────────────────────────────────────────────────────────────────────
 
-// Config buttons
 document.querySelectorAll('.config-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const key = btn.dataset.key;
@@ -415,7 +415,6 @@ function renderExam(exam) {
   setText('exam-title', exam.exam_title || 'Simulacro');
   show('exam-active');
 
-  // Timer
   examSecondsLeft = (exam.duration_minutes || 30) * 60;
   updateTimer();
   clearInterval(examTimerInterval);
@@ -425,7 +424,6 @@ function renderExam(exam) {
     if (examSecondsLeft <= 0) { clearInterval(examTimerInterval); submitExam(); }
   }, 1000);
 
-  // Questions
   const container = document.getElementById('exam-questions');
   if (!container) return;
   container.innerHTML = (exam.questions || []).map((q, i) => `
@@ -567,7 +565,6 @@ async function sendChat() {
   chatInput.value = '';
   appendChatMsg('user', msg);
 
-  // Streaming AI bubble
   const bubble = appendChatMsg('ai', '');
   bubble.classList.add('streaming');
 
@@ -603,7 +600,6 @@ async function sendChat() {
             full += parsed.text;
             bubble.innerHTML = renderMD(full);
             renderKatex(bubble);
-            // Scroll to bottom
             const msgs = document.getElementById('chat-messages');
             if (msgs) msgs.scrollTop = msgs.scrollHeight;
           }
@@ -654,7 +650,6 @@ function renderProgress(stats) {
   hide('progress-loading');
   show('progress-content');
 
-  // KPIs
   const kpisEl = document.getElementById('progress-kpis');
   if (kpisEl) {
     const avg = stats.avg_score != null ? stats.avg_score.toFixed(1) : '—';
@@ -665,7 +660,6 @@ function renderProgress(stats) {
     `;
   }
 
-  // Exam history chart
   const history = stats.exam_history || [];
   if (history.length === 0) {
     show('progress-chart-empty');
@@ -676,7 +670,6 @@ function renderProgress(stats) {
     renderChart(history);
   }
 
-  // Flashcard bars
   const fc = stats.flashcards || {};
   const fcTotal = Object.values(fc).reduce((a,b)=>a+b,0);
   const fcBars  = document.getElementById('progress-fc-bars');
@@ -748,9 +741,6 @@ function renderChart(history) {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Set subject name in chat tab
   setText('chat-subject-name', SUBJECT_ID.toUpperCase());
-
-  // If already analyzed, load cache
   loadCacheIfReady();
 });
