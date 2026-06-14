@@ -22,7 +22,7 @@
     <div class="onboarding-icon">☁️</div>
     <h2>Carga tus exámenes para entrenar tu academia</h2>
     <p>Arrastra o selecciona los archivos PDF de exámenes anteriores de <strong>{{ subject.name }}</strong>.</p>
-    
+
     <div class="upload-zone" id="upload-dropzone" onclick="document.getElementById('file-input').click()">
       <input type="file" id="file-input" multiple accept=".pdf" style="display:none">
       <div class="upload-zone__text">
@@ -31,8 +31,9 @@
       </div>
       <div id="selected-files-list" class="selected-files-list hidden"></div>
     </div>
-    
-    <button class="btn btn--primary" id="btn-cloud-analyze" style="margin-top: 20px; width: 100%; max-width: 320px; justify-content: center;" disabled>
+
+    <button class="btn btn--primary" id="btn-cloud-analyze"
+            style="margin-top: 20px; width: 100%; max-width: 320px; justify-content: center;" disabled>
       ▶ Analizar exámenes seleccionados
     </button>
   </div>
@@ -90,10 +91,10 @@
           <button class="btn btn--ghost" id="btn-card-next">Siguiente →</button>
         </div>
         <div class="cards-verdict hidden" id="cards-verdict" style="display:flex;gap:8px;justify-content:center;margin-top:15px;">
-          <button class="btn btn--danger btn--sm" onclick="rateCard(1)">Repetir</button>
-          <button class="btn btn--warning btn--sm" onclick="rateCard(3)">Difícil</button>
-          <button class="btn btn--primary btn--sm" onclick="rateCard(4)">Bien</button>
-          <button class="btn btn--success btn--sm" onclick="rateCard(5)">Fácil</button>
+          <button class="btn btn--danger btn--sm" onclick="rateCard('hard')">Repetir</button>
+          <button class="btn btn--warning btn--sm" onclick="rateCard('medium')">Difícil</button>
+          <button class="btn btn--primary btn--sm" onclick="rateCard('medium')">Bien</button>
+          <button class="btn btn--success btn--sm" onclick="rateCard('easy')">Fácil</button>
         </div>
       </div>
     </div>
@@ -200,12 +201,12 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="[https://cdn.jsdelivr.net/npm/marked/marked.min.js](https://cdn.jsdelivr.net/npm/marked/marked.min.js)"></script>
-
-<link rel="stylesheet" href="[https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css](https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css)">
-<script defer src="[https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js](https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js)"></script>
-<script defer src="[https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js](https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js)"></script>
-
-<script src="[https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js](https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js)"></script>
+<!-- FIX: URLs de CDN corregidas (estaban envueltas en corchetes de markdown) -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"
+        onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="/static/js/subject.js"></script>
 {% endblock %}
