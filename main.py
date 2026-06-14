@@ -166,17 +166,17 @@ def get_client():
 
 
 def get_subjects():
-    # Estructura fija de asignaturas para entornos Cloud donde no se escanea el disco local
-    mock_subjects = ["eda", "so", "ic"]
+    # Solo carga las asignaturas que ya han sido analizadas (tienen caché guardada)
     subjects = []
-    for sub_id in mock_subjects:
-        cache_file = DIR_RESULTADOS / f"{sub_id}_cache.json"
-        subjects.append({
-            "id":        sub_id,
-            "name":      sub_id.upper(),
-            "pdf_count": 0, # Dinámico por sesión en Cloud
-            "has_cache": cache_file.exists(),
-        })
+    if DIR_RESULTADOS.exists():
+        for file in DIR_RESULTADOS.glob("*_cache.json"):
+            sub_id = file.stem.replace("_cache", "")
+            subjects.append({
+                "id":        sub_id,
+                "name":      sub_id.upper(),
+                "pdf_count": 0, 
+                "has_cache": True,
+            })
     return subjects
 
 
@@ -204,9 +204,16 @@ def index():
 
 @app.route("/subject/<subject_id>")
 def subject_view(subject_id):
-    subject = next((s for s in get_subjects() if s["id"] == subject_id), None)
-    if not subject:
-        return "Asignatura no encontrada", 404
+    # Permite acceso dinámico a CUALQUIER asignatura sin límite
+    subject_id = subject_id.lower().strip()
+    cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
+    
+    subject = {
+        "id":        subject_id,
+        "name":      subject_id.upper(),
+        "pdf_count": 0,
+        "has_cache": cache_file.exists()
+    }
     return render_template("subject.html", subject=subject)
 
 # =============================================================================
