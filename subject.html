@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block title %}{{ subject.name }} — Academia Personal{% endblock %}
+
+{% block content %}
+<div class="page-subject" data-subject="{{ subject.id }}" id="subject-data">
+
+  <div class="subject-header">
+    <a href="/" class="back-link">← Asignaturas</a>
+    <div class="subject-header__info">
+      <h1 class="subject-title">{{ subject.name }}</h1>
+      <span class="subject-meta">Entorno Cloud Multi-Usuario</span>
+    </div>
+  </div>
+
+  <div id="analyzing-state" class="analyzing-state hidden">
+    <div class="spinner"></div>
+    <p>La IA está analizando tus exámenes...<br>
+    <small>Detectando patrones, calculando frecuencias, preparando tu academia.</small></p>
+  </div>
+
+  <div id="onboarding-state" class="onboarding-state {% if subject.has_cache %}hidden{% endif %}">
+    <div class="onboarding-icon">☁️</div>
+    <h2>Carga tus exámenes para entrenar tu academia</h2>
+    <p>Arrastra o selecciona los archivos PDF de exámenes anteriores de <strong>{{ subject.name }}</strong>.</p>
+    
+    <div class="upload-zone" id="upload-dropzone" onclick="document.getElementById('file-input').click()">
+      <input type="file" id="file-input" multiple accept=".pdf" style="display:none">
+      <div class="upload-zone__text">
+        <span class="btn btn--secondary btn--sm">Seleccionar PDFs</span>
+        <p style="margin-top: 10px; font-size: 0.85rem; color: var(--text-2);">o suelta tus exámenes aquí dentro</p>
+      </div>
+      <div id="selected-files-list" class="selected-files-list hidden"></div>
+    </div>
+    
+    <button class="btn btn--primary" id="btn-cloud-analyze" style="margin-top: 20px; width: 100%; max-width: 320px; justify-content: center;" disabled>
+      ▶ Analizar exámenes seleccionados
+    </button>
+  </div>
+
+  <div id="main-content" class="{% if not subject.has_cache %}hidden{% endif %}">
+
+    <div class="tabs">
+      <button class="tab tab--active" data-tab="patterns">Patrones</button>
+      <button class="tab" data-tab="cheatsheet">Cheat Sheet</button>
+      <button class="tab" data-tab="flashcards">Flashcards</button>
+      <button class="tab" data-tab="exam">Simulacro</button>
+      <button class="tab" data-tab="chat">Chat IA</button>
+      <button class="tab" data-tab="progress">Progreso</button>
+    </div>
+
+    <div id="tab-patterns" class="tab-content tab-content--active">
+      <div class="patterns-summary" id="patterns-summary"></div>
+      <div class="patterns-list" id="patterns-list"></div>
+      <div class="study-tips" id="study-tips"></div>
+    </div>
+
+    <div id="tab-cheatsheet" class="tab-content hidden">
+      <div class="cheatsheet-toolbar">
+        <button class="btn btn--ghost" onclick="window.print()">⎙ Imprimir</button>
+      </div>
+      <div class="cheatsheet-content" id="cheatsheet-content"></div>
+    </div>
+
+    <div id="tab-flashcards" class="tab-content hidden">
+      <div id="flashcards-loading" class="loading-inline hidden">
+        <div class="spinner spinner--sm"></div> Generando flashcards...
+      </div>
+      <div id="flashcards-empty" class="flashcards-empty">
+        <button class="btn btn--primary" id="btn-generate-cards">Generar flashcards</button>
+        <p>Tarjetas optimizadas por algoritmo de repetición espaciada</p>
+      </div>
+      <div id="flashcards-container" class="flashcards-container hidden">
+        <div class="flashcards-progress">
+          <span id="cards-progress">1 / 12</span>
+          <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        </div>
+        <div class="flashcard" id="flashcard">
+          <div class="flashcard__inner" id="flashcard-inner">
+            <div class="flashcard__front" id="card-front"></div>
+            <div class="flashcard__back" id="card-back"></div>
+          </div>
+          <div class="flashcard__meta">
+            <span id="card-category"></span>
+            <span id="card-difficulty" class="difficulty-badge"></span>
+          </div>
+        </div>
+        <div class="flashcards-controls" id="flashcards-controls">
+          <button class="btn btn--ghost" id="btn-card-prev">← Anterior</button>
+          <button class="btn btn--secondary" id="btn-card-flip">Voltear</button>
+          <button class="btn btn--ghost" id="btn-card-next">Siguiente →</button>
+        </div>
+        <div class="cards-verdict hidden" id="cards-verdict" style="display:flex;gap:8px;justify-content:center;margin-top:15px;">
+          <button class="btn btn--danger btn--sm" onclick="rateCard(1)">Repetir</button>
+          <button class="btn btn--warning btn--sm" onclick="rateCard(3)">Difícil</button>
+          <button class="btn btn--primary btn--sm" onclick="rateCard(4)">Bien</button>
+          <button class="btn btn--success btn--sm" onclick="rateCard(5)">Fácil</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-exam" class="tab-content hidden">
+      <div id="exam-setup">
+        <h2 class="tab-section-title">Simulacro de Examen</h2>
+        <p class="tab-section-sub">La IA genera preguntas al estilo del profesor. Respóndelas y recibe corrección automática con nota.</p>
+        <div class="exam-config">
+          <div class="config-group">
+            <label>Número de preguntas</label>
+            <div class="btn-group">
+              <button class="config-btn config-btn--active" data-val="3" data-key="questions">3</button>
+              <button class="config-btn" data-val="5" data-key="questions">5</button>
+              <button class="config-btn" data-val="7" data-key="questions">7</button>
+            </div>
+          </div>
+          <div class="config-group">
+            <label>Dificultad</label>
+            <div class="btn-group">
+              <button class="config-btn" data-val="easy" data-key="difficulty">Fácil</button>
+              <button class="config-btn config-btn--active" data-val="mixed" data-key="difficulty">Mixta</button>
+              <button class="config-btn" data-val="hard" data-key="difficulty">Difícil</button>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn--primary" id="btn-start-exam">Comenzar simulacro</button>
+      </div>
+      <div id="exam-loading" class="loading-inline hidden">
+        <div class="spinner spinner--sm"></div> Generando examen al estilo de la FIB...
+      </div>
+      <div id="exam-active" class="hidden">
+        <div class="exam-header">
+          <span id="exam-title"></span>
+          <span class="exam-timer" id="exam-timer"></span>
+        </div>
+        <div id="exam-questions"></div>
+        <button class="btn btn--primary" id="btn-submit-exam">Entregar examen</button>
+      </div>
+      <div id="exam-results" class="hidden">
+        <div class="results-header">
+          <div class="results-score">
+            <span id="results-score-value">—</span>
+            <span class="results-score-label">/ 10</span>
+          </div>
+          <div class="results-grade" id="results-grade"></div>
+          <p class="results-feedback" id="results-global-feedback"></p>
+        </div>
+        <div id="results-questions"></div>
+        <div class="results-actions">
+          <button class="btn btn--ghost" onclick="resetExam()">↻ Nuevo simulacro</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-chat" class="tab-content hidden">
+      <div class="chat-container">
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-message chat-message--ai">
+            <div class="chat-bubble">
+              Hola. Soy tu tutor de <strong id="chat-subject-name"></strong>.
+              Pregúntame lo que quieras: conceptos, cómo resolver un tipo de ejercicio,
+              por qué algo funciona así... Voy directo al examen.
+            </div>
+          </div>
+        </div>
+        <div class="chat-input-area">
+          <textarea id="chat-input" placeholder="¿Cómo calculo la complejidad de un algoritmo recursivo?" rows="2"></textarea>
+          <button class="btn btn--primary" id="btn-send-chat">Enviar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-progress" class="tab-content hidden">
+      <div id="progress-loading" class="loading-inline">
+        <div class="spinner spinner--sm"></div> Cargando estadísticas...
+      </div>
+      <div id="progress-content" class="hidden">
+        <div class="progress-kpis" id="progress-kpis"></div>
+        <div class="progress-section">
+          <h3 class="progress-section-title">Evolución de notas</h3>
+          <div id="progress-chart-empty" class="progress-empty hidden">
+            <p>Aún no has completado ningún simulacro. ¡Empieza uno para ver tu progreso!</p>
+            <button class="btn btn--primary btn--sm" onclick="switchTab('exam')">Ir al simulacro</button>
+          </div>
+          <div id="progress-chart-wrap" class="progress-chart-wrap hidden">
+            <canvas id="progress-chart"></canvas>
+          </div>
+        </div>
+        <div class="progress-section">
+          <h3 class="progress-section-title">Estado de flashcards</h3>
+          <div id="progress-fc-empty" class="progress-empty hidden">
+            <p>Aún no has valorado ninguna flashcard.</p>
+            <button class="btn btn--primary btn--sm" onclick="switchTab('flashcards')">Ir a flashcards</button>
+          </div>
+          <div id="progress-fc-bars" class="progress-fc-bars hidden"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="[https://cdn.jsdelivr.net/npm/marked/marked.min.js](https://cdn.jsdelivr.net/npm/marked/marked.min.js)"></script>
+
+<link rel="stylesheet" href="[https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css](https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css)">
+<script defer src="[https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js](https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js)"></script>
+<script defer src="[https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js](https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js)"></script>
+
+<script src="[https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js](https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js)"></script>
+<script src="/static/js/subject.js"></script>
+{% endblock %}
