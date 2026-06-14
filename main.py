@@ -293,6 +293,8 @@ Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
             )
         )
         data = parse_llm_json(response.text)
+        if len(data.get("patterns", [])) < 3 or not data.get("cheat_sheet", "").strip():
+            return jsonify({"error": "El análisis fue incompleto. Inténtalo de nuevo."}), 500
         save_cache(subject_id, data)
         return jsonify({"success": True, "data": data})
     except Exception as e:
