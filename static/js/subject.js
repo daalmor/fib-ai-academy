@@ -1,7 +1,7 @@
 /**
  * subject.js — Academia Personal FIB
  * Lógica completa de la página de asignatura:
- *   upload, análisis, patrones, cheat-sheet, flashcards, simulacro, chat, progreso
+ * upload, análisis, patrones, cheat-sheet, flashcards, simulacro, chat, progreso
  */
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
@@ -227,20 +227,29 @@ function renderPatterns(data) {
 
   // Cheat sheet
   const cheatEl = document.getElementById('cheatsheet-content');
-  if (cheatEl && data.cheat_sheet) {
-    cheatEl.innerHTML = renderMD(data.cheat_sheet);
-    renderKatex(cheatEl);
+  if (cheatEl) {
+    if (data.cheat_sheet && data.cheat_sheet.trim().length > 10) {
+      cheatEl.innerHTML = renderMD(data.cheat_sheet);
+      renderKatex(cheatEl);
+    } else {
+      cheatEl.innerHTML = '<p style="text-align:center; padding: 2.5rem; color: var(--amber);">⚠️ La IA no ha podido generar la Cheat Sheet completa por límite de contexto. Por favor, vuelve a la pestaña de Asignaturas y analiza los documentos de nuevo.</p>';
+    }
   }
 
   // Study tips
   const tipsEl = document.getElementById('study-tips');
-  if (tipsEl && data.study_tips && data.study_tips.length) {
-    tipsEl.innerHTML = `
-      <h3>Consejos de estudio</h3>
-      <ul class="tips-list">
-        ${data.study_tips.map(t => `<li>${t}</li>`).join('')}
-      </ul>
-    `;
+  if (tipsEl) {
+    if (data.study_tips && data.study_tips.length > 0) {
+      tipsEl.style.display = 'block';
+      tipsEl.innerHTML = `
+        <h3>Consejos de estudio</h3>
+        <ul class="tips-list">
+          ${data.study_tips.map(t => `<li>${t}</li>`).join('')}
+        </ul>
+      `;
+    } else {
+      tipsEl.style.display = 'none';
+    }
   }
 }
 
