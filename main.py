@@ -64,7 +64,7 @@ def init_db():
     """)
     con.commit()
     con.close()
-
+init_db()
 
 def save_exam_result(subject_id, total_score, max_score, grade, n_questions):
     con = sqlite3.connect(DB_PATH)
