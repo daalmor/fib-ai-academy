@@ -271,33 +271,30 @@ def analyze_subject(subject_id):
 
     client = get_client()
 
-    prompt_patterns = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
-Analiza TODOS estos exámenes históricos con MÁXIMO DETALLE y extrae los patrones de preguntas.
+    # UNA sola llamada: patrones + cheat_sheet juntos para evitar timeout en Render free
+    prompt = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
+Analiza estos exámenes históricos y devuelve un JSON completo con patrones y cheat sheet.
 
 {FORMAT_RULES}
 
-EXÁMENES HISTÓRICOS:
-{exam_text[:40000]}
+EXÁMENES:
+{exam_text[:12000]}
 
-INSTRUCCIONES CRÍTICAS:
-- Extrae ENTRE 5 Y 7 patrones distintos. NUNCA menos de 5.
-- Cada patrón debe tener description de al menos 3 frases explicando el tipo de pregunta.
-- how_to_answer debe ser un párrafo denso con el método de resolución paso a paso.
-- key_concepts: mínimo 4 conceptos por patrón.
-- common_mistakes: mínimo 3 errores frecuentes por patrón.
-- example_question: una pregunta representativa y concreta del examen.
-- frequency: porcentaje real basado en cuántas veces aparece en los exámenes (0-100).
-- difficulty: exactamente uno de estos valores: Easy, Medium, Hard."""
+INSTRUCCIONES:
+- patterns: entre 5 y 7 patrones, cada uno con description detallada, how_to_answer paso a paso,
+  key_concepts (mínimo 4), common_mistakes (mínimo 3), example_question concreta.
+- difficulty: exactamente uno de: Easy, Medium, Hard.
+- frequency: porcentaje 0-100 de veces que aparece en los exámenes.
+- cheat_sheet: Markdown denso con TODOS los conceptos, fórmulas en $LaTeX$ y pseudocódigo.
+- study_tips: 4 a 6 consejos concretos de estudio."""
 
     try:
-        # Llamada 1: patrones + study_tips con schema estricto
-        # (cheat_sheet excluido del schema para que Gemini no lo trunce)
-        response_patterns = gemini_generate(
+        response = gemini_generate(
             client,
-            contents=prompt_patterns,
+            contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=8000,
+                max_output_tokens=6000,
                 response_mime_type="application/json",
                 response_schema={
                     "type": "OBJECT",
@@ -321,14 +318,15 @@ INSTRUCCIONES CRÍTICAS:
                                 "required": ["id", "title", "frequency", "difficulty", "description", "how_to_answer"]
                             }
                         },
-                        "study_tips": {"type": "ARRAY", "items": {"type": "STRING"}}
+                        "cheat_sheet": {"type": "STRING"},
+                        "study_tips":  {"type": "ARRAY", "items": {"type": "STRING"}}
                     },
-                    "required": ["subject", "patterns", "study_tips"]
+                    "required": ["subject", "patterns", "cheat_sheet", "study_tips"]
                 }
             )
         )
-        raw_text = getattr(response_patterns, "text", None) or ""
-        print("RAW PATTERNS:", raw_text[:300])
+
+        raw_text = getattr(response, "text", None) or ""
         if not raw_text.strip():
             return jsonify({"error": "Gemini no devolvió contenido. Inténtalo de nuevo."}), 500
 
@@ -337,33 +335,8 @@ INSTRUCCIONES CRÍTICAS:
         if not data.get("patterns"):
             return jsonify({"error": "No se detectaron patrones. Asegúrate de subir PDFs con texto legible."}), 500
 
-        # Llamada 2: cheat_sheet en Markdown libre, tokens dedicados, sin schema
-        prompt_cheat = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
-Genera una cheat sheet MUY COMPLETA Y DENSA para el examen final, basada en estos exámenes históricos.
-
-{FORMAT_RULES}
-
-EXÁMENES HISTÓRICOS:
-{exam_text[:40000]}
-
-INSTRUCCIONES CRÍTICAS — SIGUE ESTO AL PIE DE LA LETRA:
-- La cheat sheet debe cubrir TODOS los temas que aparecen en los exámenes sin excepción.
-- Estructura con secciones Markdown claras (## para cada tema principal, ### para subtemas).
-- Cada sección debe incluir: definición formal, propiedades clave, fórmulas en $LaTeX$, y ejemplo concreto.
-- Para algoritmos: incluye pseudocódigo en bloque de código, complejidad temporal y espacial en $LaTeX$.
-- Mínimo 800 palabras de contenido útil. Sé extremadamente denso y técnico.
-- NO incluyas introducciones ni conclusiones. Ve directo al contenido técnico.
-- Responde ÚNICAMENTE con Markdown. Sin JSON, sin explicaciones previas."""
-
-        response_cheat = gemini_generate(
-            client,
-            contents=prompt_cheat,
-            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
-        )
-        data["cheat_sheet"] = response_cheat.text.strip()
-
-        if not data["cheat_sheet"]:
-            return jsonify({"error": "No se pudo generar la Cheat Sheet. Inténtalo de nuevo."}), 500
+        if not data.get("cheat_sheet", "").strip():
+            data["cheat_sheet"] = "⚠️ Cheat sheet no generada. Vuelve a analizar."
 
         save_cache(subject_id, data)
         return jsonify({"success": True, "data": data})
@@ -378,6 +351,19 @@ def get_cache(subject_id):
     if data:
         return jsonify({"success": True, "data": data})
     return jsonify({"success": False}), 404
+
+
+@app.route("/api/cache/<subject_id>", methods=["DELETE"])
+def delete_cache(subject_id):
+    """Borra el caché de una asignatura. Útil para reintentar el análisis."""
+    cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
+    try:
+        if cache_file.exists():
+            cache_file.unlink()
+            return jsonify({"success": True, "message": f"Caché de {subject_id} borrado. Ahora puedes analizar de nuevo."})
+        return jsonify({"success": False, "error": "No existe caché para esta asignatura"}), 404
+    except Exception as e:
+        return jsonify({"error": f"Error borrando caché: {e}"}), 500
 
 # =============================================================================
 #  API: FLASHCARDS
