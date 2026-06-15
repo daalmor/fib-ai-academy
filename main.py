@@ -246,7 +246,7 @@ def analyze_subject(subject_id):
         return jsonify({"error": err}), 400
 
     client = get_client()
-    prompt = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
+    prompt_patterns = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
 Analiza estos exámenes históricos y extrae los patrones de preguntas más frecuentes.
 
 {FORMAT_RULES}
@@ -257,11 +257,12 @@ EXÁMENES HISTÓRICOS:
 Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
 
     try:
-        response = client.models.generate_content(
-            model=MODEL, contents=prompt,
+        # Llamada 1: patrones + study_tips (sin cheat_sheet en el schema para no truncar)
+        response_patterns = client.models.generate_content(
+            model=MODEL, contents=prompt_patterns,
             config=types.GenerateContentConfig(
-                temperature=0.2, 
-                max_output_tokens=8000, 
+                temperature=0.2,
+                max_output_tokens=8000,
                 response_mime_type="application/json",
                 response_schema={
                     "type": "OBJECT",
@@ -285,19 +286,39 @@ Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
                                 "required": ["id", "title", "frequency", "difficulty", "description", "how_to_answer"]
                             }
                         },
-                        "cheat_sheet": {"type": "STRING"},
                         "study_tips": {"type": "ARRAY", "items": {"type": "STRING"}}
                     },
-                    "required": ["subject", "patterns", "cheat_sheet", "study_tips"]
+                    "required": ["subject", "patterns", "study_tips"]
                 }
             )
         )
-        data = parse_llm_json(response.text)
-        # DEBUG TEMPORAL - bórralo después
-        print("PATRONES:", len(data.get("patterns", [])))
-        print("CHEAT_SHEET:", repr(data.get("cheat_sheet", "")[:100]))
-        if len(data.get("patterns", [])) < 3 or not data.get("cheat_sheet", "").strip():
-            return jsonify({"error": "El análisis fue incompleto. Inténtalo de nuevo."}), 500
+        data = parse_llm_json(response_patterns.text)
+
+        if len(data.get("patterns", [])) < 3:
+            return jsonify({"error": "El análisis fue incompleto (pocos patrones). Inténtalo de nuevo."}), 500
+
+        # Llamada 2: cheat_sheet por separado en texto libre (sin schema, tokens dedicados)
+        prompt_cheat = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
+Basándote en estos exámenes históricos, genera una cheat sheet completa y densa en Markdown.
+
+{FORMAT_RULES}
+
+EXÁMENES:
+{exam_text[:40000]}
+
+Genera una cheat sheet extensa con todos los conceptos, fórmulas y algoritmos clave.
+Usa $LaTeX$ para fórmulas y bloques de código para implementaciones.
+Responde ÚNICAMENTE con el texto Markdown de la cheat sheet, sin JSON ni explicaciones."""
+
+        response_cheat = client.models.generate_content(
+            model=MODEL, contents=prompt_cheat,
+            config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8000)
+        )
+        data["cheat_sheet"] = response_cheat.text.strip()
+
+        if not data["cheat_sheet"]:
+            return jsonify({"error": "No se pudo generar la Cheat Sheet. Inténtalo de nuevo."}), 500
+
         save_cache(subject_id, data)
         return jsonify({"success": True, "data": data})
     except Exception as e:
