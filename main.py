@@ -10,6 +10,7 @@ import json
 import re
 import time
 import sqlite3
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request, stream_with_context, Response
@@ -269,32 +270,26 @@ def analyze_subject(subject_id):
     if not ok:
         return jsonify({"error": err}), 400
 
-    client = get_client()
+    client     = get_client()
+    exam_chunk = exam_text[:20000]
 
-    # UNA sola llamada: patrones + cheat_sheet juntos para evitar timeout en Render free
-    prompt = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
-Analiza estos exámenes históricos y devuelve un JSON completo con patrones y cheat sheet.
+    # ── Llamada A: patrones (JSON estructurado) ──────────────────────────────
+    def fetch_patterns():
+        prompt = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
+Analiza estos exámenes y extrae los patrones de preguntas más frecuentes.
 
 {FORMAT_RULES}
 
 EXÁMENES:
-{exam_text[:12000]}
+{exam_chunk}
 
-INSTRUCCIONES:
-- patterns: entre 5 y 7 patrones, cada uno con description detallada, how_to_answer paso a paso,
-  key_concepts (mínimo 4), common_mistakes (mínimo 3), example_question concreta.
+- Extrae entre 5 y 7 patrones distintos.
 - difficulty: exactamente uno de: Easy, Medium, Hard.
-- frequency: porcentaje 0-100 de veces que aparece en los exámenes.
-- cheat_sheet: Markdown denso con TODOS los conceptos, fórmulas en $LaTeX$ y pseudocódigo.
-- study_tips: 4 a 6 consejos concretos de estudio."""
-
-    try:
-        response = gemini_generate(
-            client,
-            contents=prompt,
+- frequency: porcentaje 0-100."""
+        return gemini_generate(
+            client, contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=6000,
+                temperature=0.2, max_output_tokens=5000,
                 response_mime_type="application/json",
                 response_schema={
                     "type": "OBJECT",
@@ -318,29 +313,57 @@ INSTRUCCIONES:
                                 "required": ["id", "title", "frequency", "difficulty", "description", "how_to_answer"]
                             }
                         },
-                        "cheat_sheet": {"type": "STRING"},
-                        "study_tips":  {"type": "ARRAY", "items": {"type": "STRING"}}
+                        "study_tips": {"type": "ARRAY", "items": {"type": "STRING"}}
                     },
-                    "required": ["subject", "patterns", "cheat_sheet", "study_tips"]
+                    "required": ["subject", "patterns", "study_tips"]
                 }
             )
         )
 
-        raw_text = getattr(response, "text", None) or ""
-        if not raw_text.strip():
-            return jsonify({"error": "Gemini no devolvió contenido. Inténtalo de nuevo."}), 500
+    # ── Llamada B: cheat_sheet (Markdown libre, sin schema) ──────────────────
+    def fetch_cheat():
+        prompt = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
+Genera una cheat sheet completa en Markdown para el examen final.
 
-        data = parse_llm_json(raw_text)
+{FORMAT_RULES}
+
+EXÁMENES:
+{exam_chunk}
+
+- Cubre TODOS los temas que aparecen en los exámenes.
+- Secciones con ## y ###. Fórmulas en $LaTeX$. Pseudocódigo en bloques de código.
+- Sé denso y técnico. Sin introducciones. Solo contenido útil para el examen.
+- Responde ÚNICAMENTE con Markdown."""
+        return gemini_generate(
+            client, contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=5000)
+        )
+
+    try:
+        # Ejecutar ambas llamadas EN PARALELO
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_patterns = executor.submit(fetch_patterns)
+            future_cheat    = executor.submit(fetch_cheat)
+            resp_patterns   = future_patterns.result(timeout=55)
+            resp_cheat      = future_cheat.result(timeout=55)
+
+        raw_patterns = getattr(resp_patterns, "text", None) or ""
+        if not raw_patterns.strip():
+            return jsonify({"error": "Gemini no devolvió patrones. Inténtalo de nuevo."}), 500
+
+        data = parse_llm_json(raw_patterns)
 
         if not data.get("patterns"):
-            return jsonify({"error": "No se detectaron patrones. Asegúrate de subir PDFs con texto legible."}), 500
+            return jsonify({"error": "No se detectaron patrones. Sube PDFs con más texto."}), 500
 
-        if not data.get("cheat_sheet", "").strip():
-            data["cheat_sheet"] = "⚠️ Cheat sheet no generada. Vuelve a analizar."
+        cheat = (getattr(resp_cheat, "text", None) or "").strip()
+        data["cheat_sheet"] = cheat if cheat else "⚠️ Cheat sheet no generada. Vuelve a analizar."
 
         save_cache(subject_id, data)
         return jsonify({"success": True, "data": data})
 
+    except concurrent.futures.TimeoutError:
+        return jsonify({"error": "Tiempo de espera agotado. Inténtalo de nuevo."}), 504
     except Exception as e:
         return jsonify({"error": f"Error analizando: {e}"}), 500
 
