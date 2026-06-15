@@ -42,7 +42,7 @@ REGLAS DE FORMATO OBLIGATORIAS (sin excepción):
 # =============================================================================
 
 def gemini_generate(client, contents, config, retries=4, delay=15):
-    """Llama a Gemini con reintentos automáticos ante errores 503/429/timeout."""
+    """Llama a Gemini con reintentos automáticos ante errores transitorios."""
     last_err = None
     for attempt in range(retries):
         try:
@@ -52,16 +52,14 @@ def gemini_generate(client, contents, config, retries=4, delay=15):
         except Exception as e:
             last_err = e
             err_str = str(e)
-            # Reintentar solo en errores transitorios
             if any(code in err_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "timeout")):
                 if attempt < retries - 1:
-                    wait = delay * (attempt + 1)  # backoff: 15s, 30s, 45s
+                    wait = delay * (attempt + 1)
                     print(f"[gemini_generate] intento {attempt+1}/{retries} fallido ({err_str[:80]}). Reintentando en {wait}s...")
                     time.sleep(wait)
                     continue
-            raise  # Error no transitorio → propagar inmediatamente
+            raise
     raise RuntimeError(f"Gemini no disponible tras {retries} intentos: {last_err}")
-
 
 # =============================================================================
 #  BASE DE DATOS DE PROGRESO
@@ -242,7 +240,7 @@ def subject_view(subject_id):
     return render_template("subject.html", subject=subject)
 
 # =============================================================================
-#  API: ANÁLISIS DE PATRONES (CLOUD MULTI-USER UPLOAD)
+#  API: ANÁLISIS DE PATRONES — llamadas paralelas, sin response_schema
 # =============================================================================
 
 @app.route("/api/analyze/<subject_id>", methods=["POST"])
@@ -271,81 +269,90 @@ def analyze_subject(subject_id):
         return jsonify({"error": err}), 400
 
     client     = get_client()
-    exam_chunk = exam_text[:20000]
+    # Usar hasta 40 000 chars de contexto para mayor riqueza de análisis
+    exam_chunk = exam_text[:40000]
 
-    # ── Llamada A: patrones (JSON estructurado) ──────────────────────────────
+    # ── Llamada A: patrones (JSON libre, sin response_schema que limite el output) ──
     def fetch_patterns():
-        prompt = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
-Analiza estos exámenes y extrae los patrones de preguntas más frecuentes.
+        prompt = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
+Analiza estos exámenes históricos y extrae los patrones de preguntas más frecuentes.
 
 {FORMAT_RULES}
 
-EXÁMENES:
+EXÁMENES HISTÓRICOS:
 {exam_chunk}
 
-- Extrae entre 5 y 7 patrones distintos.
-- difficulty: exactamente uno de: Easy, Medium, Hard.
-- frequency: porcentaje 0-100."""
+Responde ÚNICAMENTE con un objeto JSON válido con esta estructura exacta:
+
+{{
+  "subject": "{subject_id.upper()}",
+  "patterns": [
+    {{
+      "id": 1,
+      "title": "Nombre corto del patrón",
+      "frequency": 95,
+      "difficulty": "Alta",
+      "description": "Explicación clara de qué evalúa este patrón (mínimo 2-3 frases).",
+      "key_concepts": ["concepto1", "concepto2", "concepto3"],
+      "how_to_answer": "Plantilla paso a paso detallada. Usa $LaTeX$ para fórmulas y bloques de código para algoritmos.",
+      "common_mistakes": ["error frecuente 1", "error frecuente 2"],
+      "example_question": "Una pregunta de ejemplo típica de examen, completa y concreta."
+    }}
+  ],
+  "study_tips": ["consejo1", "consejo2", "consejo3"]
+}}
+
+INSTRUCCIONES CRÍTICAS:
+- Extrae EXACTAMENTE entre 5 y 7 patrones distintos. Nunca menos de 5.
+- Cada patrón debe tener TODOS los campos: id, title, frequency, difficulty, description, key_concepts, how_to_answer, common_mistakes, example_question.
+- how_to_answer debe tener al menos 3 pasos concretos y detallados.
+- La frecuencia es un porcentaje (0-100) basado en cuántas veces aparece en los exámenes.
+- difficulty debe ser exactamente uno de: "Baja", "Media", "Alta".
+- NO incluyas cheat_sheet aquí."""
         return gemini_generate(
             client, contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0.2, max_output_tokens=5000,
-                response_mime_type="application/json",
-                response_schema={
-                    "type": "OBJECT",
-                    "properties": {
-                        "subject": {"type": "STRING"},
-                        "patterns": {
-                            "type": "ARRAY",
-                            "items": {
-                                "type": "OBJECT",
-                                "properties": {
-                                    "id":               {"type": "INTEGER"},
-                                    "title":            {"type": "STRING"},
-                                    "frequency":        {"type": "INTEGER"},
-                                    "difficulty":       {"type": "STRING"},
-                                    "description":      {"type": "STRING"},
-                                    "key_concepts":     {"type": "ARRAY", "items": {"type": "STRING"}},
-                                    "how_to_answer":    {"type": "STRING"},
-                                    "common_mistakes":  {"type": "ARRAY", "items": {"type": "STRING"}},
-                                    "example_question": {"type": "STRING"}
-                                },
-                                "required": ["id", "title", "frequency", "difficulty", "description", "how_to_answer"]
-                            }
-                        },
-                        "study_tips": {"type": "ARRAY", "items": {"type": "STRING"}}
-                    },
-                    "required": ["subject", "patterns", "study_tips"]
-                }
+                temperature=0.2,
+                max_output_tokens=12000,
+                response_mime_type="application/json"
             )
         )
 
-    # ── Llamada B: cheat_sheet (Markdown libre, sin schema) ──────────────────
+    # ── Llamada B: cheat_sheet (texto Markdown libre, tokens altos) ──────────
     def fetch_cheat():
         prompt = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
-Genera una cheat sheet completa en Markdown para el examen final.
+Genera una cheat sheet COMPLETA y DENSA en Markdown para el examen final.
 
 {FORMAT_RULES}
 
-EXÁMENES:
+EXÁMENES HISTÓRICOS:
 {exam_chunk}
 
-- Cubre TODOS los temas que aparecen en los exámenes.
-- Secciones con ## y ###. Fórmulas en $LaTeX$. Pseudocódigo en bloques de código.
-- Sé denso y técnico. Sin introducciones. Solo contenido útil para el examen.
-- Responde ÚNICAMENTE con Markdown."""
+INSTRUCCIONES:
+- Cubre ABSOLUTAMENTE TODOS los temas que aparecen en los exámenes.
+- Usa ## para secciones principales y ### para subsecciones.
+- Todas las fórmulas en $LaTeX$ inline o $$LaTeX$$ en bloque.
+- Todo pseudocódigo/código en bloques ```lenguaje ... ```.
+- Sé extremadamente denso y técnico: cada línea debe aportar valor para el examen.
+- Sin introducciones ni conclusiones. Solo contenido útil.
+- Mínimo 800 palabras de contenido técnico.
+- Responde ÚNICAMENTE con Markdown (sin texto antes ni después)."""
         return gemini_generate(
             client, contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=5000)
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=10000
+            )
         )
 
     try:
-        # Ejecutar ambas llamadas EN PARALELO
+        # Ejecutar ambas llamadas EN PARALELO para reducir tiempo de espera
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_patterns = executor.submit(fetch_patterns)
             future_cheat    = executor.submit(fetch_cheat)
-            resp_patterns   = future_patterns.result(timeout=55)
-            resp_cheat      = future_cheat.result(timeout=55)
+            # Timeout generoso: Gemini 2.5 Flash puede tardar en outputs largos
+            resp_patterns = future_patterns.result(timeout=120)
+            resp_cheat    = future_cheat.result(timeout=120)
 
         raw_patterns = getattr(resp_patterns, "text", None) or ""
         if not raw_patterns.strip():
@@ -363,7 +370,7 @@ EXÁMENES:
         return jsonify({"success": True, "data": data})
 
     except concurrent.futures.TimeoutError:
-        return jsonify({"error": "Tiempo de espera agotado. Inténtalo de nuevo."}), 504
+        return jsonify({"error": "Tiempo de espera agotado (>120s). Inténtalo de nuevo."}), 504
     except Exception as e:
         return jsonify({"error": f"Error analizando: {e}"}), 500
 
@@ -378,12 +385,12 @@ def get_cache(subject_id):
 
 @app.route("/api/cache/<subject_id>", methods=["DELETE"])
 def delete_cache(subject_id):
-    """Borra el caché de una asignatura. Útil para reintentar el análisis."""
+    """Borra el caché para forzar un nuevo análisis."""
     cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
     try:
         if cache_file.exists():
             cache_file.unlink()
-            return jsonify({"success": True, "message": f"Caché de {subject_id} borrado. Ahora puedes analizar de nuevo."})
+            return jsonify({"success": True, "message": f"Caché de {subject_id} borrado."})
         return jsonify({"success": False, "error": "No existe caché para esta asignatura"}), 404
     except Exception as e:
         return jsonify({"error": f"Error borrando caché: {e}"}), 500
@@ -433,7 +440,7 @@ def get_flashcards(subject_id):
 Genera exactamente 12 flashcards de estudio. Usa $LaTeX$ para fórmulas matemáticas
 y bloques de código Markdown para algoritmos cuando sea necesario.
 
-Responde ÚNICAMENTE con un array JSON válido:
+Responde ÚNICAMENTE con un array JSON válido (sin texto antes ni después):
 
 [
   {{
@@ -443,13 +450,19 @@ Responde ÚNICAMENTE con un array JSON válido:
     "category": "nombre del patrón al que pertenece",
     "difficulty": "Fácil|Media|Difícil"
   }}
-]"""
+]
+
+INSTRUCCIONES: Genera EXACTAMENTE 12 tarjetas, cubiertas todas las áreas clave."""
 
     try:
         response = gemini_generate(
             client,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=4000, response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=6000,
+                response_mime_type="application/json"
+            )
         )
         cards = parse_llm_json(response.text)
         return jsonify({"success": True, "flashcards": cards})
@@ -470,9 +483,11 @@ def generate_exam(subject_id):
     n_questions = request.json.get("n_questions", 5)
     client      = get_client()
 
-    # Acceso seguro a example_question (campo opcional)
+    # Acceso seguro: example_question es opcional en caché antiguo
     patterns_summary = json.dumps(
-        [{"title": p["title"], "example": p.get("example_question", ""), "how": p["how_to_answer"]}
+        [{"title": p["title"],
+          "example": p.get("example_question", ""),
+          "how": p.get("how_to_answer", "")}
          for p in cache["patterns"]], ensure_ascii=False
     )
 
@@ -503,13 +518,20 @@ Responde ÚNICAMENTE con JSON válido:
       "grading_criteria": ["criterio1", "criterio2", "criterio3"]
     }}
   ]
-}}"""
+}}
+
+INSTRUCCIONES: Genera EXACTAMENTE {n_questions} preguntas distintas. Cada pregunta debe
+ser realista, basada en los patrones, y tener una respuesta modelo completa."""
 
     try:
         response = gemini_generate(
             client,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=5000, response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                max_output_tokens=8000,
+                response_mime_type="application/json"
+            )
         )
         exam = parse_llm_json(response.text)
         return jsonify({"success": True, "exam": exam})
@@ -559,8 +581,8 @@ Corrige cada pregunta. Responde ÚNICAMENTE con JSON válido:
       "question_id": 1,
       "score": 1.5,
       "max_score": 2,
-      "feedback": "Feedback detallado",
-      "what_was_right": "Puntos positivos",
+      "feedback": "Feedback detallado y constructivo",
+      "what_was_right": "Qué hizo bien el alumno",
       "what_was_wrong": "Qué faltó o estuvo incorrecto",
       "correct_approach": "Cómo debería haberse respondido"
     }}
@@ -568,7 +590,7 @@ Corrige cada pregunta. Responde ÚNICAMENTE con JSON válido:
   "total_score": 7.5,
   "max_score": 10,
   "grade": "Notable",
-  "global_feedback": "Feedback global",
+  "global_feedback": "Feedback global motivador y concreto",
   "recommended_patterns": ["patrón 1", "patrón 2"]
 }}"""
 
@@ -576,7 +598,11 @@ Corrige cada pregunta. Responde ÚNICAMENTE con JSON válido:
         response = gemini_generate(
             client,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=4000, response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=5000,
+                response_mime_type="application/json"
+            )
         )
         result = parse_llm_json(response.text)
 
@@ -647,7 +673,11 @@ Contexto de la asignatura:
         try:
             stream = client.models.generate_content_stream(
                 model=MODEL, contents=contents,
-                config=types.GenerateContentConfig(system_instruction=system, temperature=0.5, max_output_tokens=2000)
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    temperature=0.5,
+                    max_output_tokens=3000
+                )
             )
             for chunk in stream:
                 if chunk.text:
