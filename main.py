@@ -319,10 +319,15 @@ Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
                 }
             )
         )
-        data = parse_llm_json(response_patterns.text)
+        raw_text = getattr(response_patterns, "text", None) or ""
+        print("RAW PATTERNS:", raw_text[:300])
+        if not raw_text.strip():
+            return jsonify({"error": "Gemini no devolvió contenido. Inténtalo de nuevo."}), 500
 
-        if len(data.get("patterns", [])) < 3:
-            return jsonify({"error": "El análisis detectó pocos patrones. Inténtalo de nuevo o sube más exámenes."}), 500
+        data = parse_llm_json(raw_text)
+
+        if not data.get("patterns"):
+            return jsonify({"error": "No se detectaron patrones. Asegúrate de subir PDFs con texto legible."}), 500
 
         # Llamada 2: cheat_sheet en Markdown libre, tokens dedicados, sin schema
         prompt_cheat = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
