@@ -272,14 +272,22 @@ def analyze_subject(subject_id):
     client = get_client()
 
     prompt_patterns = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
-Analiza estos exámenes históricos y extrae los patrones de preguntas más frecuentes.
+Analiza TODOS estos exámenes históricos con MÁXIMO DETALLE y extrae los patrones de preguntas.
 
 {FORMAT_RULES}
 
 EXÁMENES HISTÓRICOS:
 {exam_text[:40000]}
 
-Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
+INSTRUCCIONES CRÍTICAS:
+- Extrae ENTRE 5 Y 7 patrones distintos. NUNCA menos de 5.
+- Cada patrón debe tener description de al menos 3 frases explicando el tipo de pregunta.
+- how_to_answer debe ser un párrafo denso con el método de resolución paso a paso.
+- key_concepts: mínimo 4 conceptos por patrón.
+- common_mistakes: mínimo 3 errores frecuentes por patrón.
+- example_question: una pregunta representativa y concreta del examen.
+- frequency: porcentaje real basado en cuántas veces aparece en los exámenes (0-100).
+- difficulty: exactamente uno de estos valores: Easy, Medium, Hard."""
 
     try:
         # Llamada 1: patrones + study_tips con schema estricto
@@ -331,21 +339,26 @@ Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
 
         # Llamada 2: cheat_sheet en Markdown libre, tokens dedicados, sin schema
         prompt_cheat = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
-Basándote en estos exámenes históricos, genera una cheat sheet completa y densa en Markdown.
+Genera una cheat sheet MUY COMPLETA Y DENSA para el examen final, basada en estos exámenes históricos.
 
 {FORMAT_RULES}
 
-EXÁMENES:
+EXÁMENES HISTÓRICOS:
 {exam_text[:40000]}
 
-Genera una cheat sheet extensa con todos los conceptos, fórmulas y algoritmos clave.
-Usa $LaTeX$ para fórmulas y bloques de código para implementaciones.
-Responde ÚNICAMENTE con el texto Markdown de la cheat sheet, sin JSON ni explicaciones."""
+INSTRUCCIONES CRÍTICAS — SIGUE ESTO AL PIE DE LA LETRA:
+- La cheat sheet debe cubrir TODOS los temas que aparecen en los exámenes sin excepción.
+- Estructura con secciones Markdown claras (## para cada tema principal, ### para subtemas).
+- Cada sección debe incluir: definición formal, propiedades clave, fórmulas en $LaTeX$, y ejemplo concreto.
+- Para algoritmos: incluye pseudocódigo en bloque de código, complejidad temporal y espacial en $LaTeX$.
+- Mínimo 800 palabras de contenido útil. Sé extremadamente denso y técnico.
+- NO incluyas introducciones ni conclusiones. Ve directo al contenido técnico.
+- Responde ÚNICAMENTE con Markdown. Sin JSON, sin explicaciones previas."""
 
         response_cheat = gemini_generate(
             client,
             contents=prompt_cheat,
-            config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8000)
+            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
         )
         data["cheat_sheet"] = response_cheat.text.strip()
 
