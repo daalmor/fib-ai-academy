@@ -8,6 +8,7 @@ Uso Cloud:   gunicorn main:app
 import os
 import json
 import re
+import time
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -36,11 +37,36 @@ REGLAS DE FORMATO OBLIGATORIAS (sin excepción):
 """
 
 # =============================================================================
+#  REINTENTO AUTOMÁTICO PARA GEMINI (503 / rate limit / timeout)
+# =============================================================================
+
+def gemini_generate(client, contents, config, retries=4, delay=15):
+    """Llama a Gemini con reintentos automáticos ante errores 503/429/timeout."""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return client.models.generate_content(
+                model=MODEL, contents=contents, config=config
+            )
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            # Reintentar solo en errores transitorios
+            if any(code in err_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "timeout")):
+                if attempt < retries - 1:
+                    wait = delay * (attempt + 1)  # backoff: 15s, 30s, 45s
+                    print(f"[gemini_generate] intento {attempt+1}/{retries} fallido ({err_str[:80]}). Reintentando en {wait}s...")
+                    time.sleep(wait)
+                    continue
+            raise  # Error no transitorio → propagar inmediatamente
+    raise RuntimeError(f"Gemini no disponible tras {retries} intentos: {last_err}")
+
+
+# =============================================================================
 #  BASE DE DATOS DE PROGRESO
 # =============================================================================
 
 def init_db():
-    # Asegurar que la carpeta data existe antes de crear la BD
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.executescript("""
@@ -65,6 +91,7 @@ def init_db():
     con.commit()
     con.close()
 init_db()
+
 
 def save_exam_result(subject_id, total_score, max_score, grade, n_questions):
     con = sqlite3.connect(DB_PATH)
@@ -166,7 +193,6 @@ def get_client():
 
 
 def get_subjects():
-    # Solo carga las asignaturas que ya han sido analizadas (tienen caché guardada)
     subjects = []
     if DIR_RESULTADOS.exists():
         for file in DIR_RESULTADOS.glob("*_cache.json"):
@@ -174,7 +200,7 @@ def get_subjects():
             subjects.append({
                 "id":        sub_id,
                 "name":      sub_id.upper(),
-                "pdf_count": 0, 
+                "pdf_count": 0,
                 "has_cache": True,
             })
     return subjects
@@ -204,10 +230,8 @@ def index():
 
 @app.route("/subject/<subject_id>")
 def subject_view(subject_id):
-    # Permite acceso dinámico a CUALQUIER asignatura sin límite
     subject_id = subject_id.lower().strip()
     cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
-    
     subject = {
         "id":        subject_id,
         "name":      subject_id.upper(),
@@ -224,7 +248,7 @@ def subject_view(subject_id):
 def analyze_subject(subject_id):
     if 'files' not in request.files:
         return jsonify({"error": "No se han seleccionado archivos para analizar"}), 400
-        
+
     uploaded_files = request.files.getlist('files')
     if not uploaded_files or uploaded_files[0].filename == '':
         return jsonify({"error": "No se han seleccionado archivos válidos"}), 400
@@ -246,6 +270,7 @@ def analyze_subject(subject_id):
         return jsonify({"error": err}), 400
 
     client = get_client()
+
     prompt_patterns = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
 Analiza estos exámenes históricos y extrae los patrones de preguntas más frecuentes.
 
@@ -257,9 +282,11 @@ EXÁMENES HISTÓRICOS:
 Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
 
     try:
-        # Llamada 1: patrones + study_tips (sin cheat_sheet en el schema para no truncar)
-        response_patterns = client.models.generate_content(
-            model=MODEL, contents=prompt_patterns,
+        # Llamada 1: patrones + study_tips con schema estricto
+        # (cheat_sheet excluido del schema para que Gemini no lo trunce)
+        response_patterns = gemini_generate(
+            client,
+            contents=prompt_patterns,
             config=types.GenerateContentConfig(
                 temperature=0.2,
                 max_output_tokens=8000,
@@ -273,14 +300,14 @@ Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
                             "items": {
                                 "type": "OBJECT",
                                 "properties": {
-                                    "id": {"type": "INTEGER"},
-                                    "title": {"type": "STRING"},
-                                    "frequency": {"type": "INTEGER"},
-                                    "difficulty": {"type": "STRING"},
-                                    "description": {"type": "STRING"},
-                                    "key_concepts": {"type": "ARRAY", "items": {"type": "STRING"}},
-                                    "how_to_answer": {"type": "STRING"},
-                                    "common_mistakes": {"type": "ARRAY", "items": {"type": "STRING"}},
+                                    "id":               {"type": "INTEGER"},
+                                    "title":            {"type": "STRING"},
+                                    "frequency":        {"type": "INTEGER"},
+                                    "difficulty":       {"type": "STRING"},
+                                    "description":      {"type": "STRING"},
+                                    "key_concepts":     {"type": "ARRAY", "items": {"type": "STRING"}},
+                                    "how_to_answer":    {"type": "STRING"},
+                                    "common_mistakes":  {"type": "ARRAY", "items": {"type": "STRING"}},
                                     "example_question": {"type": "STRING"}
                                 },
                                 "required": ["id", "title", "frequency", "difficulty", "description", "how_to_answer"]
@@ -295,9 +322,9 @@ Extrae entre 4 y 7 patrones. La frecuencia es un porcentaje (0-100)."""
         data = parse_llm_json(response_patterns.text)
 
         if len(data.get("patterns", [])) < 3:
-            return jsonify({"error": "El análisis fue incompleto (pocos patrones). Inténtalo de nuevo."}), 500
+            return jsonify({"error": "El análisis detectó pocos patrones. Inténtalo de nuevo o sube más exámenes."}), 500
 
-        # Llamada 2: cheat_sheet por separado en texto libre (sin schema, tokens dedicados)
+        # Llamada 2: cheat_sheet en Markdown libre, tokens dedicados, sin schema
         prompt_cheat = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
 Basándote en estos exámenes históricos, genera una cheat sheet completa y densa en Markdown.
 
@@ -310,8 +337,9 @@ Genera una cheat sheet extensa con todos los conceptos, fórmulas y algoritmos c
 Usa $LaTeX$ para fórmulas y bloques de código para implementaciones.
 Responde ÚNICAMENTE con el texto Markdown de la cheat sheet, sin JSON ni explicaciones."""
 
-        response_cheat = client.models.generate_content(
-            model=MODEL, contents=prompt_cheat,
+        response_cheat = gemini_generate(
+            client,
+            contents=prompt_cheat,
             config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8000)
         )
         data["cheat_sheet"] = response_cheat.text.strip()
@@ -321,6 +349,7 @@ Responde ÚNICAMENTE con el texto Markdown de la cheat sheet, sin JSON ni explic
 
         save_cache(subject_id, data)
         return jsonify({"success": True, "data": data})
+
     except Exception as e:
         return jsonify({"error": f"Error analizando: {e}"}), 500
 
@@ -390,8 +419,9 @@ Responde ÚNICAMENTE con un array JSON válido:
 ]"""
 
     try:
-        response = client.models.generate_content(
-            model=MODEL, contents=prompt,
+        response = gemini_generate(
+            client,
+            contents=prompt,
             config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=4000, response_mime_type="application/json")
         )
         cards = parse_llm_json(response.text)
@@ -413,8 +443,9 @@ def generate_exam(subject_id):
     n_questions = request.json.get("n_questions", 5)
     client      = get_client()
 
+    # Acceso seguro a example_question (campo opcional)
     patterns_summary = json.dumps(
-        [{"title": p["title"], "example": p["example_question"], "how": p["how_to_answer"]}
+        [{"title": p["title"], "example": p.get("example_question", ""), "how": p["how_to_answer"]}
          for p in cache["patterns"]], ensure_ascii=False
     )
 
@@ -448,8 +479,9 @@ Responde ÚNICAMENTE con JSON válido:
 }}"""
 
     try:
-        response = client.models.generate_content(
-            model=MODEL, contents=prompt,
+        response = gemini_generate(
+            client,
+            contents=prompt,
             config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=5000, response_mime_type="application/json")
         )
         exam = parse_llm_json(response.text)
@@ -514,8 +546,9 @@ Corrige cada pregunta. Responde ÚNICAMENTE con JSON válido:
 }}"""
 
     try:
-        response = client.models.generate_content(
-            model=MODEL, contents=prompt,
+        response = gemini_generate(
+            client,
+            contents=prompt,
             config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=4000, response_mime_type="application/json")
         )
         result = parse_llm_json(response.text)
