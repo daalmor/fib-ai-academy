@@ -1,694 +1,493 @@
 """
-Academia Personal — Backend Flask (Versión SaaS Cloud-Ready)
-=========================================================
-Uso Local:   python main.py
-Uso Cloud:   gunicorn main:app
+Academia Personal — Backend Flask (Cloud Run + Google Cloud Storage)
+====================================================================
+Local:   GOOGLE_API_KEY=xxx GCS_BUCKET=academia-fib-data python main.py
+Cloud:   gunicorn main:app
 """
 
-import os
-import json
-import re
-import time
-import sqlite3
-import concurrent.futures
+import os, json, re, io, sqlite3, tempfile
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request, stream_with_context, Response
-
 from google import genai
 from google.genai import types
+from google.cloud import storage as gcs
 from pypdf import PdfReader
 from json_repair import repair_json
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
 
-BASE_DIR       = Path(__file__).parent
-DIR_RESULTADOS = BASE_DIR / "data" / "resultados"
-DIR_RESULTADOS.mkdir(parents=True, exist_ok=True)
-
-DB_PATH = BASE_DIR / "data" / "progress.db"
-MODEL   = "gemini-2.5-flash"
+MODEL         = 'gemini-2.5-flash'
 MIN_PDF_CHARS = 200
+BUCKET_NAME   = os.environ.get('GCS_BUCKET', 'academia-fib-data')
+ALLOWED_EXT   = {'pdf'}
 
 FORMAT_RULES = """
-REGLAS DE FORMATO OBLIGATORIAS (sin excepción):
-- Cualquier expresión matemática o complejidad algorítmica DEBE escribirse en LaTeX inline: $O(n \\log n)$, $T(n) = 2T(n/2) + O(n)$, etc.
-- Cualquier fragmento de código o pseudocódigo DEBE ir en un bloque de código Markdown con el lenguaje especificado: ```cpp ... ``` o ```python ... ```.
-- NO uses notación plana como O(n log n) o T(n)=... fuera de LaTeX.
+REGLAS DE FORMATO OBLIGATORIAS:
+- Fórmulas matemáticas en LaTeX inline: $O(n \\log n)$, $T(n) = 2T(n/2) + O(n)$
+- Código/pseudocódigo en bloques Markdown con lenguaje: ```cpp ... ``` o ```python ... ```
+- NO uses notación plana fuera de LaTeX.
 """
 
 # =============================================================================
-#  REINTENTO AUTOMÁTICO PARA GEMINI (503 / rate limit / timeout)
+#  GCS HELPERS
 # =============================================================================
 
-def gemini_generate(client, contents, config, retries=4, delay=15):
-    """Llama a Gemini con reintentos automáticos ante errores transitorios."""
-    last_err = None
-    for attempt in range(retries):
-        try:
-            return client.models.generate_content(
-                model=MODEL, contents=contents, config=config
-            )
-        except Exception as e:
-            last_err = e
-            err_str = str(e)
-            if any(code in err_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "timeout")):
-                if attempt < retries - 1:
-                    wait = delay * (attempt + 1)
-                    print(f"[gemini_generate] intento {attempt+1}/{retries} fallido ({err_str[:80]}). Reintentando en {wait}s...")
-                    time.sleep(wait)
-                    continue
-            raise
-    raise RuntimeError(f"Gemini no disponible tras {retries} intentos: {last_err}")
+def get_bucket():
+    client = gcs.Client()
+    return client.bucket(BUCKET_NAME)
+
+def gcs_exists(path: str) -> bool:
+    return get_bucket().blob(path).exists()
+
+def gcs_read(path: str) -> bytes:
+    return get_bucket().blob(path).download_as_bytes()
+
+def gcs_read_text(path: str) -> str:
+    return gcs_read(path).decode('utf-8')
+
+def gcs_write(path: str, data: bytes, content_type: str = 'application/octet-stream'):
+    blob = get_bucket().blob(path)
+    blob.upload_from_string(data, content_type=content_type)
+
+def gcs_write_text(path: str, text: str):
+    gcs_write(path, text.encode('utf-8'), 'text/plain; charset=utf-8')
+
+def gcs_write_json(path: str, obj):
+    gcs_write(path, json.dumps(obj, ensure_ascii=False, indent=2).encode('utf-8'), 'application/json')
+
+def gcs_read_json(path: str):
+    return json.loads(gcs_read_text(path))
+
+def gcs_delete(path: str):
+    blob = get_bucket().blob(path)
+    if blob.exists():
+        blob.delete()
+
+def gcs_list(prefix: str) -> list[str]:
+    return [b.name for b in get_bucket().list_blobs(prefix=prefix)]
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT
 
 # =============================================================================
-#  BASE DE DATOS DE PROGRESO
+#  PROGRESS — persistido en GCS (survives Cloud Run cold starts)
+#  Estructura: progreso/{subject_id}_progress.json
 # =============================================================================
+
+def _progress_path(subject_id: str) -> str:
+    return f"progreso/{subject_id}_progress.json"
+
+def _load_progress(subject_id: str) -> dict:
+    path = _progress_path(subject_id)
+    if gcs_exists(path):
+        return gcs_read_json(path)
+    return {"exam_history": [], "flashcard_progress": {}}
+
+def _save_progress(subject_id: str, data: dict):
+    gcs_write_json(_progress_path(subject_id), data)
 
 def init_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
-    con.executescript("""
-        CREATE TABLE IF NOT EXISTS exam_results (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            subject_id  TEXT    NOT NULL,
-            date        TEXT    NOT NULL,
-            total_score REAL    NOT NULL,
-            max_score   REAL    NOT NULL,
-            grade       TEXT    NOT NULL,
-            n_questions INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS flashcard_progress (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            subject_id  TEXT    NOT NULL,
-            card_id     INTEGER NOT NULL,
-            rating      TEXT    NOT NULL,
-            date        TEXT    NOT NULL,
-            UNIQUE(subject_id, card_id) ON CONFLICT REPLACE
-        );
-    """)
-    con.commit()
-    con.close()
-init_db()
-
+    pass  # No-op: progress now lives in GCS
 
 def save_exam_result(subject_id, total_score, max_score, grade, n_questions):
-    con = sqlite3.connect(DB_PATH)
-    con.execute(
-        "INSERT INTO exam_results (subject_id, date, total_score, max_score, grade, n_questions) VALUES (?,?,?,?,?,?)",
-        (subject_id, datetime.now().isoformat(), total_score, max_score, grade, n_questions)
-    )
-    con.commit()
-    con.close()
+    p = _load_progress(subject_id)
+    p.setdefault("exam_history", []).append({
+        "date":        datetime.now().isoformat(),
+        "total_score": total_score,
+        "max_score":   max_score,
+        "grade":       grade,
+        "n_questions": n_questions,
+    })
+    # Keep last 20 exams
+    p["exam_history"] = p["exam_history"][-20:]
+    _save_progress(subject_id, p)
 
+def save_flashcard_rating(subject_id: str, card_id: int, rating: str):
+    p = _load_progress(subject_id)
+    p.setdefault("flashcard_progress", {})[str(card_id)] = {
+        "rating": rating,
+        "date":   datetime.now().isoformat(),
+    }
+    _save_progress(subject_id, p)
 
 def get_subject_stats(subject_id):
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
+    p       = _load_progress(subject_id)
+    history = p.get("exam_history", [])
+    fc_map  = p.get("flashcard_progress", {})
 
-    rows = con.execute(
-        "SELECT date, total_score, max_score, grade FROM exam_results WHERE subject_id=? ORDER BY date ASC LIMIT 20",
-        (subject_id,)
-    ).fetchall()
-    history = [dict(r) for r in rows]
+    scores  = [r["total_score"] * 10.0 / r["max_score"] for r in history if r.get("max_score")]
+    avg     = round(sum(scores) / len(scores), 2) if scores else None
 
-    avg_row = con.execute(
-        "SELECT AVG(total_score * 10.0 / max_score) as avg FROM exam_results WHERE subject_id=?",
-        (subject_id,)
-    ).fetchone()
-    avg_score = round(avg_row["avg"], 2) if avg_row["avg"] else None
+    fc_counts: dict = {}
+    for v in fc_map.values():
+        r = v.get("rating", "")
+        fc_counts[r] = fc_counts.get(r, 0) + 1
 
-    fc_rows = con.execute(
-        "SELECT rating, COUNT(*) as cnt FROM flashcard_progress WHERE subject_id=? GROUP BY rating",
-        (subject_id,)
-    ).fetchall()
-    fc_stats = {r["rating"]: r["cnt"] for r in fc_rows}
-
-    total_exams = con.execute(
-        "SELECT COUNT(*) as cnt FROM exam_results WHERE subject_id=?", (subject_id,)
-    ).fetchone()["cnt"]
-
-    con.close()
     return {
         "exam_history": history,
-        "avg_score":    avg_score,
-        "flashcards":   fc_stats,
-        "total_exams":  total_exams,
+        "avg_score":    avg,
+        "flashcards":   fc_counts,
+        "total_exams":  len(history),
     }
 
 # =============================================================================
-#  PARSEO ROBUSTO DE JSON
+#  JSON REPAIR
 # =============================================================================
 
-def parse_llm_json(raw: str):
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-
-    cleaned = raw.strip()
-    cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^```\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    cleaned = cleaned.strip()
-
-    first = min((cleaned.find(c) for c in ('{', '[') if cleaned.find(c) != -1), default=0)
-    if first > 0:
-        cleaned = cleaned[first:]
-    last = max(cleaned.rfind('}'), cleaned.rfind(']'))
-    if last != -1 and last < len(cleaned) - 1:
-        cleaned = cleaned[:last + 1]
-
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    repaired = repair_json(cleaned, return_objects=True)
-    if repaired is None or repaired == "" or repaired == {} or repaired == []:
-        raise ValueError(f"No se pudo parsear el JSON. Inicio: {repr(raw[:300])}")
-    return repaired
+def parse_llm_json(raw):
+    try: return json.loads(raw)
+    except: pass
+    c = raw.strip()
+    c = re.sub(r"^```json\s*","",c,flags=re.IGNORECASE)
+    c = re.sub(r"^```\s*","",c); c = re.sub(r"\s*```$","",c); c = c.strip()
+    f = min((c.find(x) for x in ('{','[') if c.find(x)!=-1), default=0)
+    if f > 0: c = c[f:]
+    l = max(c.rfind('}'), c.rfind(']'))
+    if l != -1 and l < len(c)-1: c = c[:l+1]
+    try: return json.loads(c)
+    except: pass
+    r = repair_json(c, return_objects=True)
+    if not r: raise ValueError(f"No se pudo parsear JSON: {repr(raw[:200])}")
+    return r
 
 # =============================================================================
-#  UTILIDADES
+#  PDF UTILS
 # =============================================================================
 
-def validate_pdf_text(text, context="los PDFs"):
+def extract_pdfs_text_from_gcs(subject_id: str) -> str:
+    """Lee todos los PDFs de un subject desde GCS y extrae su texto."""
+    prefix = f"examenes/{subject_id}/"
+    blobs  = gcs_list(prefix)
+    texts  = []
+    for blob_name in sorted(blobs):
+        if not blob_name.endswith('.pdf'): continue
+        filename = blob_name.split('/')[-1]
+        try:
+            pdf_bytes = gcs_read(blob_name)
+            reader    = PdfReader(io.BytesIO(pdf_bytes))
+            text      = "\n".join(p.extract_text() or "" for p in reader.pages).strip()
+            if text:
+                texts.append(f"=== {filename} ===\n{text}")
+        except Exception as e:
+            texts.append(f"=== {filename} === [Error: {e}]")
+    return "\n\n".join(texts)
+
+def validate_pdf_text(text, ctx="los PDFs"):
     if not text or len(text.strip()) < MIN_PDF_CHARS:
-        return False, (
-            f"No se encontró suficiente texto legible en {context} "
-            f"(mínimo {MIN_PDF_CHARS} caracteres). "
-            "Es posible que los PDFs sean imágenes escaneadas sin OCR. "
-            "Pásalos por un OCR antes de subirlos."
-        )
+        return False, (f"No hay suficiente texto legible en {ctx}. "
+                       "¿Son PDFs escaneados? Pásalos por OCR primero.")
     return True, ""
 
-
 def get_client():
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        raise ValueError("GOOGLE_API_KEY no encontrada. Configúrala en tu entorno de Windows o Render.")
-    return genai.Client(api_key=api_key)
-
-
-def get_subjects():
-    subjects = []
-    if DIR_RESULTADOS.exists():
-        for file in DIR_RESULTADOS.glob("*_cache.json"):
-            sub_id = file.stem.replace("_cache", "")
-            subjects.append({
-                "id":        sub_id,
-                "name":      sub_id.upper(),
-                "pdf_count": 0,
-                "has_cache": True,
-            })
-    return subjects
-
-
-def load_cache(subject_id):
-    cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
-    if cache_file.exists():
-        with open(cache_file, encoding="utf-8") as f:
-            return json.load(f, strict=False)
-    return None
-
-
-def save_cache(subject_id, data):
-    cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
-    with open(cache_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    key = os.environ.get("GOOGLE_API_KEY","")
+    if not key: raise ValueError("GOOGLE_API_KEY no configurada.")
+    return genai.Client(api_key=key)
 
 # =============================================================================
-#  RUTAS PRINCIPALES
+#  SUBJECTS (desde GCS)
+# =============================================================================
+
+def get_subjects() -> list[dict]:
+    """Lista asignaturas leyendo prefijos en GCS."""
+    blobs    = gcs_list("examenes/")
+    subjects = {}
+    for blob_name in blobs:
+        parts = blob_name.split('/')
+        if len(parts) >= 2:
+            sid = parts[1]
+            if sid not in subjects:
+                subjects[sid] = {"id": sid, "name": sid.upper(), "pdf_count": 0, "has_cache": False}
+            if blob_name.endswith('.pdf'):
+                subjects[sid]["pdf_count"] += 1
+
+    # Check caches
+    cache_blobs = gcs_list("resultados/")
+    for blob_name in cache_blobs:
+        if blob_name.endswith('_cache.json'):
+            sid = blob_name.replace('resultados/','').replace('_cache.json','')
+            if sid in subjects:
+                subjects[sid]["has_cache"] = True
+
+    return sorted(subjects.values(), key=lambda x: x["id"])
+
+def load_cache(sid):
+    path = f"resultados/{sid}_cache.json"
+    if gcs_exists(path):
+        return gcs_read_json(path)
+    return None
+
+def save_cache(sid, data):
+    gcs_write_json(f"resultados/{sid}_cache.json", data)
+
+# =============================================================================
+#  ROUTES — PAGES
 # =============================================================================
 
 @app.route("/")
 def index():
-    return render_template("index.html", subjects=get_subjects())
+    try:
+        subjects = get_subjects()
+    except Exception:
+        subjects = []
+    return render_template("index.html", subjects=subjects)
 
-
-@app.route("/subject/<subject_id>")
-def subject_view(subject_id):
-    subject_id = subject_id.lower().strip()
-    cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
-    subject = {
-        "id":        subject_id,
-        "name":      subject_id.upper(),
-        "pdf_count": 0,
-        "has_cache": cache_file.exists()
-    }
-    return render_template("subject.html", subject=subject)
+@app.route("/subject/<sid>")
+def subject_view(sid):
+    try:
+        subjects = get_subjects()
+        sub = next((s for s in subjects if s["id"]==sid), None)
+        # Si no existe en GCS aún pero se acaba de crear, construirlo
+        if not sub:
+            sub = {"id": sid, "name": sid.upper(), "pdf_count": 0, "has_cache": False}
+    except Exception:
+        sub = {"id": sid, "name": sid.upper(), "pdf_count": 0, "has_cache": False}
+    return render_template("subject.html", subject=sub)
 
 # =============================================================================
-#  API: ANÁLISIS DE PATRONES — llamadas paralelas, sin response_schema
+#  API — SUBJECTS
 # =============================================================================
 
-@app.route("/api/analyze/<subject_id>", methods=["POST"])
-def analyze_subject(subject_id):
+@app.route("/api/subjects", methods=["POST"])
+def create_subject():
+    body = request.json or {}
+    name = body.get("name","").strip().lower().replace(" ","_")
+    if not name or len(name) < 1:
+        return jsonify({"error": "Nombre requerido"}), 400
+    # Crear un marcador en GCS para que el subject exista
+    gcs_write_text(f"examenes/{name}/.keep", "")
+    return jsonify({"success": True, "id": name})
+
+# =============================================================================
+#  API — UPLOAD PDFs
+# =============================================================================
+
+@app.route("/api/upload/<sid>", methods=["POST"])
+def upload_pdfs(sid):
     if 'files' not in request.files:
-        return jsonify({"error": "No se han seleccionado archivos para analizar"}), 400
+        return jsonify({"error": "No se enviaron archivos"}), 400
 
-    uploaded_files = request.files.getlist('files')
-    if not uploaded_files or uploaded_files[0].filename == '':
-        return jsonify({"error": "No se han seleccionado archivos válidos"}), 400
+    saved  = []
+    errors = []
+    for f in request.files.getlist('files'):
+        if not f.filename: continue
+        if not allowed_file(f.filename):
+            errors.append(f"{f.filename}: solo PDFs"); continue
+        name = secure_filename(f.filename)
+        try:
+            gcs_write(f"examenes/{sid}/{name}", f.read(), 'application/pdf')
+            saved.append(name)
+        except Exception as e:
+            errors.append(f"{f.filename}: {e}")
 
-    texts = []
-    for file in uploaded_files:
-        if file and file.filename.endswith('.pdf'):
-            try:
-                reader = PdfReader(file)
-                text = "\n".join(p.extract_text() or "" for p in reader.pages).strip()
-                if text:
-                    texts.append(f"=== {file.filename} ===\n{text}")
-            except Exception as e:
-                return jsonify({"error": f"Error leyendo {file.filename}: {e}"}), 500
+    if not saved and errors:
+        return jsonify({"error": "; ".join(errors)}), 400
+    return jsonify({"success": True, "saved": saved, "errors": errors})
 
-    exam_text = "\n\n".join(texts)
-    ok, err   = validate_pdf_text(exam_text, "los exámenes subidos")
-    if not ok:
-        return jsonify({"error": err}), 400
+@app.route("/api/pdfs/<sid>")
+def list_pdfs(sid):
+    blobs = gcs_list(f"examenes/{sid}/")
+    pdfs  = [b.split('/')[-1] for b in blobs if b.endswith('.pdf')]
+    return jsonify({"pdfs": sorted(pdfs)})
 
-    client     = get_client()
-    # Usar hasta 40 000 chars de contexto para mayor riqueza de análisis
-    exam_chunk = exam_text[:40000]
+@app.route("/api/pdfs/<sid>/<filename>", methods=["DELETE"])
+def delete_pdf(sid, filename):
+    gcs_delete(f"examenes/{sid}/{secure_filename(filename)}")
+    return jsonify({"success": True})
 
-    # ── Llamada A: patrones (JSON libre, sin response_schema que limite el output) ──
-    def fetch_patterns():
-        prompt = f"""Eres un examinador experto en la asignatura {subject_id.upper()} de la FIB (UPC).
+# =============================================================================
+#  API — ANALYSE
+# =============================================================================
+
+@app.route("/api/analyze/<sid>", methods=["POST"])
+def analyze_subject(sid):
+    exam_text = extract_pdfs_text_from_gcs(sid)
+    ok, err   = validate_pdf_text(exam_text, "los exámenes")
+    if not ok: return jsonify({"error": err}), 400
+
+    client = get_client()
+    prompt = f"""Eres un examinador experto en {sid.upper()} de la FIB (UPC).
 Analiza estos exámenes históricos y extrae los patrones de preguntas más frecuentes.
 
 {FORMAT_RULES}
 
-EXÁMENES HISTÓRICOS:
-{exam_chunk}
+EXÁMENES:
+{exam_text[:40000]}
 
-Responde ÚNICAMENTE con un objeto JSON válido con esta estructura exacta:
-
+Responde SOLO con JSON válido:
 {{
-  "subject": "{subject_id.upper()}",
-  "patterns": [
-    {{
-      "id": 1,
-      "title": "Nombre corto del patrón",
-      "frequency": 95,
-      "difficulty": "Alta",
-      "description": "Explicación clara de qué evalúa este patrón (mínimo 2-3 frases).",
-      "key_concepts": ["concepto1", "concepto2", "concepto3"],
-      "how_to_answer": "Plantilla paso a paso detallada. Usa $LaTeX$ para fórmulas y bloques de código para algoritmos.",
-      "common_mistakes": ["error frecuente 1", "error frecuente 2"],
-      "example_question": "Una pregunta de ejemplo típica de examen, completa y concreta."
-    }}
-  ],
-  "study_tips": ["consejo1", "consejo2", "consejo3"]
+  "subject": "{sid.upper()}",
+  "patterns": [{{
+    "id": 1, "title": "...", "frequency": 90, "difficulty": "Alta",
+    "description": "...", "key_concepts": ["..."],
+    "how_to_answer": "...", "common_mistakes": ["..."],
+    "example_question": "..."
+  }}],
+  "cheat_sheet": "Markdown denso con LaTeX y bloques de código.",
+  "study_tips": ["..."]
 }}
-
-INSTRUCCIONES CRÍTICAS:
-- Extrae EXACTAMENTE entre 5 y 7 patrones distintos. Nunca menos de 5.
-- Cada patrón debe tener TODOS los campos: id, title, frequency, difficulty, description, key_concepts, how_to_answer, common_mistakes, example_question.
-- how_to_answer debe tener al menos 3 pasos concretos y detallados.
-- La frecuencia es un porcentaje (0-100) basado en cuántas veces aparece en los exámenes.
-- difficulty debe ser exactamente uno de: "Baja", "Media", "Alta".
-- NO incluyas cheat_sheet aquí."""
-        return gemini_generate(
-            client, contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=12000,
-                response_mime_type="application/json"
-            )
-        )
-
-    # ── Llamada B: cheat_sheet (texto Markdown libre, tokens altos) ──────────
-    def fetch_cheat():
-        prompt = f"""Eres un examinador experto en {subject_id.upper()} de la FIB (UPC).
-Genera una cheat sheet COMPLETA y DENSA en Markdown para el examen final.
-
-{FORMAT_RULES}
-
-EXÁMENES HISTÓRICOS:
-{exam_chunk}
-
-INSTRUCCIONES:
-- Cubre ABSOLUTAMENTE TODOS los temas que aparecen en los exámenes.
-- Usa ## para secciones principales y ### para subsecciones.
-- Todas las fórmulas en $LaTeX$ inline o $$LaTeX$$ en bloque.
-- Todo pseudocódigo/código en bloques ```lenguaje ... ```.
-- Sé extremadamente denso y técnico: cada línea debe aportar valor para el examen.
-- Sin introducciones ni conclusiones. Solo contenido útil.
-- Mínimo 800 palabras de contenido técnico.
-- Responde ÚNICAMENTE con Markdown (sin texto antes ni después)."""
-        return gemini_generate(
-            client, contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=10000
-            )
-        )
+Entre 4 y 7 patrones."""
 
     try:
-        # Ejecutar ambas llamadas EN PARALELO para reducir tiempo de espera
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_patterns = executor.submit(fetch_patterns)
-            future_cheat    = executor.submit(fetch_cheat)
-            # Timeout generoso: Gemini 2.5 Flash puede tardar en outputs largos
-            resp_patterns = future_patterns.result(timeout=120)
-            resp_cheat    = future_cheat.result(timeout=120)
-
-        raw_patterns = getattr(resp_patterns, "text", None) or ""
-        if not raw_patterns.strip():
-            return jsonify({"error": "Gemini no devolvió patrones. Inténtalo de nuevo."}), 500
-
-        data = parse_llm_json(raw_patterns)
-
-        if not data.get("patterns"):
-            return jsonify({"error": "No se detectaron patrones. Sube PDFs con más texto."}), 500
-
-        cheat = (getattr(resp_cheat, "text", None) or "").strip()
-        data["cheat_sheet"] = cheat if cheat else "⚠️ Cheat sheet no generada. Vuelve a analizar."
-
-        save_cache(subject_id, data)
+        r    = client.models.generate_content(
+            model=MODEL, contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8000, response_mime_type="application/json")
+        )
+        data = parse_llm_json(r.text)
+        save_cache(sid, data)
         return jsonify({"success": True, "data": data})
-
-    except concurrent.futures.TimeoutError:
-        return jsonify({"error": "Tiempo de espera agotado (>120s). Inténtalo de nuevo."}), 504
     except Exception as e:
         return jsonify({"error": f"Error analizando: {e}"}), 500
 
-
-@app.route("/api/cache/<subject_id>")
-def get_cache(subject_id):
-    data = load_cache(subject_id)
-    if data:
-        return jsonify({"success": True, "data": data})
-    return jsonify({"success": False}), 404
-
-
-@app.route("/api/cache/<subject_id>", methods=["DELETE"])
-def delete_cache(subject_id):
-    """Borra el caché para forzar un nuevo análisis."""
-    cache_file = DIR_RESULTADOS / f"{subject_id}_cache.json"
-    try:
-        if cache_file.exists():
-            cache_file.unlink()
-            return jsonify({"success": True, "message": f"Caché de {subject_id} borrado."})
-        return jsonify({"success": False, "error": "No existe caché para esta asignatura"}), 404
-    except Exception as e:
-        return jsonify({"error": f"Error borrando caché: {e}"}), 500
+@app.route("/api/cache/<sid>")
+def get_cache(sid):
+    data = load_cache(sid)
+    return jsonify({"success": True, "data": data}) if data else (jsonify({"success": False}), 404)
 
 # =============================================================================
-#  API: FLASHCARDS
+#  API — FLASHCARDS (ruta fija ANTES de la dinámica)
 # =============================================================================
 
 @app.route("/api/flashcards/update", methods=["POST"])
 def update_flashcard_progress():
-    body       = request.json or {}
-    subject_id = body.get("subject_id")
-    card_id    = body.get("card_id")
-    rating     = body.get("rating")
+    body = request.json or {}
+    sid, card_id, rating = body.get("subject_id"), body.get("card_id"), body.get("rating")
+    if not sid or card_id is None or rating not in ("easy","medium","hard"):
+        return jsonify({"error": "Params: subject_id, card_id, rating"}), 400
+    con = sqlite3.connect(DB_PATH)
+    con.execute("INSERT OR REPLACE INTO flashcard_progress VALUES (null,?,?,?,?)",
+                (sid, card_id, rating, datetime.now().isoformat()))
+    con.commit(); con.close()
+    return jsonify({"success": True})
 
-    if not subject_id or card_id is None or rating not in ("easy", "medium", "hard"):
-        return jsonify({"error": "Parámetros inválidos."}), 400
-
-    try:
-        con = sqlite3.connect(DB_PATH)
-        con.execute(
-            "INSERT OR REPLACE INTO flashcard_progress (subject_id, card_id, rating, date) VALUES (?,?,?,?)",
-            (subject_id, card_id, rating, datetime.now().isoformat())
-        )
-        con.commit()
-        con.close()
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/flashcards/<subject_id>")
-def get_flashcards(subject_id):
-    cache = load_cache(subject_id)
-    if not cache:
-        return jsonify({"error": "Primero analiza la asignatura"}), 404
-
-    client           = get_client()
-    patterns_summary = json.dumps(cache["patterns"], ensure_ascii=False)
-
-    prompt = f"""A partir de estos patrones de examen de {subject_id.upper()}:
-
-{patterns_summary}
+@app.route("/api/flashcards/<sid>")
+def get_flashcards(sid):
+    cache = load_cache(sid)
+    if not cache: return jsonify({"error": "Primero analiza la asignatura"}), 404
+    client = get_client()
+    prompt = f"""Patrones de {sid.upper()}:
+{json.dumps(cache["patterns"], ensure_ascii=False)}
 
 {FORMAT_RULES}
 
-Genera exactamente 12 flashcards de estudio. Usa $LaTeX$ para fórmulas matemáticas
-y bloques de código Markdown para algoritmos cuando sea necesario.
-
-Responde ÚNICAMENTE con un array JSON válido (sin texto antes ni después):
-
-[
-  {{
-    "id": 1,
-    "front": "Pregunta o concepto a memorizar (concisa). Usa $LaTeX$ si hay fórmulas.",
-    "back": "Respuesta completa y útil para el examen. Usa $LaTeX$ y bloques de código.",
-    "category": "nombre del patrón al que pertenece",
-    "difficulty": "Fácil|Media|Difícil"
-  }}
-]
-
-INSTRUCCIONES: Genera EXACTAMENTE 12 tarjetas, cubiertas todas las áreas clave."""
-
+Genera exactamente 12 flashcards. Responde SOLO con JSON:
+[{{"id":1,"front":"...","back":"...","category":"...","difficulty":"Fácil|Media|Difícil"}}]"""
     try:
-        response = gemini_generate(
-            client,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=6000,
-                response_mime_type="application/json"
-            )
+        r = client.models.generate_content(
+            model=MODEL, contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=4000, response_mime_type="application/json")
         )
-        cards = parse_llm_json(response.text)
-        return jsonify({"success": True, "flashcards": cards})
+        return jsonify({"success": True, "flashcards": parse_llm_json(r.text)})
     except Exception as e:
-        return jsonify({"error": f"Error generando flashcards: {e}"}), 500
+        return jsonify({"error": f"Error: {e}"}), 500
 
 # =============================================================================
-#  API: SIMULACRO DE EXAMEN
+#  API — EXAM
 # =============================================================================
 
-@app.route("/api/exam/generate/<subject_id>", methods=["POST"])
-def generate_exam(subject_id):
-    cache = load_cache(subject_id)
-    if not cache:
-        return jsonify({"error": "Primero analiza la asignatura"}), 404
-
-    difficulty  = request.json.get("difficulty", "mixed")
-    n_questions = request.json.get("n_questions", 5)
-    client      = get_client()
-
-    # Acceso seguro: example_question es opcional en caché antiguo
-    patterns_summary = json.dumps(
-        [{"title": p["title"],
-          "example": p.get("example_question", ""),
-          "how": p.get("how_to_answer", "")}
-         for p in cache["patterns"]], ensure_ascii=False
-    )
-
-    prompt = f"""Eres un profesor de {subject_id.upper()} de la FIB (UPC) creando un examen real.
-
-{FORMAT_RULES}
-
-Patrones de preguntas conocidos:
-{patterns_summary}
-
-Genera un examen con exactamente {n_questions} preguntas. Dificultad: {difficulty}.
-Usa $LaTeX$ para todas las fórmulas matemáticas y bloques de código para algoritmos.
-
-Responde ÚNICAMENTE con JSON válido:
-
-{{
-  "exam_title": "Simulacro de Examen — {subject_id.upper()}",
-  "duration_minutes": {n_questions * 15},
-  "questions": [
-    {{
-      "id": 1,
-      "text": "Enunciado completo. Usa $LaTeX$ para fórmulas.",
-      "type": "desarrollo|calculo|implementacion|teoria",
-      "points": 2,
-      "pattern": "patrón al que pertenece",
-      "hint": "Una pista sutil si el alumno se bloquea",
-      "model_answer": "Respuesta modelo completa. Usa $LaTeX$ y bloques de código.",
-      "grading_criteria": ["criterio1", "criterio2", "criterio3"]
-    }}
-  ]
-}}
-
-INSTRUCCIONES: Genera EXACTAMENTE {n_questions} preguntas distintas. Cada pregunta debe
-ser realista, basada en los patrones, y tener una respuesta modelo completa."""
-
+@app.route("/api/exam/generate/<sid>", methods=["POST"])
+def generate_exam(sid):
+    cache = load_cache(sid)
+    if not cache: return jsonify({"error": "Primero analiza"}), 404
+    diff = request.json.get("difficulty","mixed")
+    nq   = request.json.get("n_questions", 5)
+    client = get_client()
+    ps = json.dumps([{"title":p["title"],"example":p["example_question"],"how":p["how_to_answer"]}
+                     for p in cache["patterns"]], ensure_ascii=False)
+    prompt = f"""Profesor de {sid.upper()} FIB. {FORMAT_RULES}
+Patrones: {ps}
+Genera {nq} preguntas. Dificultad: {diff}.
+JSON:
+{{"exam_title":"Simulacro — {sid.upper()}","duration_minutes":{nq*15},"questions":[
+  {{"id":1,"text":"...","type":"desarrollo|calculo|implementacion|teoria","points":2,
+    "pattern":"...","hint":"...","model_answer":"...","grading_criteria":["..."]}}
+]}}"""
     try:
-        response = gemini_generate(
-            client,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=8000,
-                response_mime_type="application/json"
-            )
+        r = client.models.generate_content(
+            model=MODEL, contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=5000, response_mime_type="application/json")
         )
-        exam = parse_llm_json(response.text)
-        return jsonify({"success": True, "exam": exam})
+        return jsonify({"success": True, "exam": parse_llm_json(r.text)})
     except Exception as e:
-        return jsonify({"error": f"Error generando examen: {e}"}), 500
-
-# =============================================================================
-#  API: CORRECCIÓN DE EXAMEN
-# =============================================================================
+        return jsonify({"error": f"Error: {e}"}), 500
 
 @app.route("/api/exam/grade", methods=["POST"])
 def grade_exam():
-    data       = request.json or {}
-    subject_id = data.get("subject_id")
-    questions  = data.get("questions", [])
-
-    if not questions:
-        return jsonify({"error": "No hay respuestas para corregir"}), 400
-
-    client  = get_client()
-    qa_text = ""
-    for i, q in enumerate(questions, 1):
-        qa_text += f"""
-PREGUNTA {i} ({q.get('points', 2)} puntos):
-{q.get('question_text', '')}
-
-CRITERIOS DE CORRECCIÓN:
-{chr(10).join(q.get('grading_criteria', []))}
-
-RESPUESTA MODELO:
-{q.get('model_answer', '')}
-
-RESPUESTA DEL ALUMNO:
-{q.get('user_answer', '') or '[Sin responder]'}
-
----"""
-
-    prompt = f"""Eres un corrector estricto pero justo de {subject_id.upper()} en la FIB.
-
-{qa_text}
-
-Corrige cada pregunta. Responde ÚNICAMENTE con JSON válido:
-
-{{
-  "results": [
-    {{
-      "question_id": 1,
-      "score": 1.5,
-      "max_score": 2,
-      "feedback": "Feedback detallado y constructivo",
-      "what_was_right": "Qué hizo bien el alumno",
-      "what_was_wrong": "Qué faltó o estuvo incorrecto",
-      "correct_approach": "Cómo debería haberse respondido"
-    }}
-  ],
-  "total_score": 7.5,
-  "max_score": 10,
-  "grade": "Notable",
-  "global_feedback": "Feedback global motivador y concreto",
-  "recommended_patterns": ["patrón 1", "patrón 2"]
-}}"""
-
+    data = request.json or {}
+    sid  = data.get("subject_id")
+    qs   = data.get("questions", [])
+    if not qs: return jsonify({"error": "Sin respuestas"}), 400
+    client = get_client()
+    qa = ""
+    for i,q in enumerate(qs,1):
+        qa += f"\nPREGUNTA {i} ({q.get('points',2)} pts):\n{q.get('question_text','')}\n" \
+              f"CRITERIOS:\n{chr(10).join(q.get('grading_criteria',[]))}\n" \
+              f"MODELO:\n{q.get('model_answer','')}\nALUMNO:\n{q.get('user_answer','') or '[Sin responder]'}\n---"
+    prompt = f"""Corrector de {sid} FIB.\n{qa}\nJSON:
+{{"results":[{{"question_id":1,"score":1.5,"max_score":2,"feedback":"...","what_was_right":"...","what_was_wrong":"...","correct_approach":"..."}}],
+  "total_score":7.5,"max_score":10,"grade":"Notable","global_feedback":"...","recommended_patterns":["..."]}}"""
     try:
-        response = gemini_generate(
-            client,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=5000,
-                response_mime_type="application/json"
-            )
+        r = client.models.generate_content(
+            model=MODEL, contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=4000, response_mime_type="application/json")
         )
-        result = parse_llm_json(response.text)
-
+        result = parse_llm_json(r.text)
         try:
-            save_exam_result(
-                subject_id  = subject_id,
-                total_score = result.get("total_score", 0),
-                max_score   = result.get("max_score", 10),
-                grade       = result.get("grade", "-"),
-                n_questions = len(questions),
-            )
-        except Exception:
-            pass
-
+            save_exam_result(sid, result.get("total_score",0), result.get("max_score",10),
+                             result.get("grade","-"), len(qs))
+        except: pass
         return jsonify({"success": True, "result": result})
     except Exception as e:
-        return jsonify({"error": f"Error corrigiendo examen: {e}"}), 500
+        return jsonify({"error": f"Error: {e}"}), 500
 
 # =============================================================================
-#  API: ESTADÍSTICAS DE PROGRESO
+#  API — STATS & CHAT
 # =============================================================================
 
-@app.route("/api/stats/<subject_id>")
-def get_stats(subject_id):
-    try:
-        stats = get_subject_stats(subject_id)
-        return jsonify({"success": True, "stats": stats})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route("/api/stats/<sid>")
+def get_stats(sid):
+    try: return jsonify({"success": True, "stats": get_subject_stats(sid)})
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
-# =============================================================================
-#  API: CHAT CON LA ASIGNATURA
-# =============================================================================
-
-@app.route("/api/chat/<subject_id>", methods=["POST"])
-def chat_with_subject(subject_id):
-    user_message = request.json.get("message", "")
-    history      = request.json.get("history", [])
-
-    if not user_message:
-        return jsonify({"error": "Mensaje vacío"}), 400
-
-    cache   = load_cache(subject_id)
-    context = ""
+@app.route("/api/chat/<sid>", methods=["POST"])
+def chat(sid):
+    msg     = request.json.get("message","")
+    history = request.json.get("history",[])
+    if not msg: return jsonify({"error": "Mensaje vacío"}), 400
+    cache   = load_cache(sid)
+    ctx     = ""
     if cache:
-        context  = f"Patrones detectados: {json.dumps(cache['patterns'][:3], ensure_ascii=False)}\n"
-        context += f"Cheat sheet: {cache.get('cheat_sheet', '')[:2000]}"
-
+        ctx  = f"Patrones: {json.dumps(cache['patterns'][:3], ensure_ascii=False)}\n"
+        ctx += f"Cheat: {cache.get('cheat_sheet','')[:2000]}"
     client = get_client()
-    system = f"""Eres el tutor personal de {subject_id.upper()} de la FIB (UPC).
-Tu misión: explicar conceptos de forma clara, directa y orientada al examen.
-Cuando expliques algo, sigue siempre este esquema: concepto → por qué importa → cómo cae en el examen.
-
+    system = f"""Tutor de {sid.upper()} FIB. Esquema: concepto → por qué importa → cómo cae en el examen.
 {FORMAT_RULES}
-
-Usa $LaTeX$ para TODAS las fórmulas (complejidades, recurrencias, demostraciones).
-Usa bloques de código Markdown con el lenguaje especificado para cualquier fragmento de código o pseudocódigo.
-
-Contexto de la asignatura:
-{context}"""
-
-    contents = []
-    for msg in history[-6:]:
-        contents.append(types.Content(role=msg["role"], parts=[types.Part(text=msg["content"])]))
-    contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
-
-    def generate():
+{ctx}"""
+    contents = [types.Content(role=m["role"], parts=[types.Part(text=m["content"])]) for m in history[-6:]]
+    contents.append(types.Content(role="user", parts=[types.Part(text=msg)]))
+    def gen():
         try:
-            stream = client.models.generate_content_stream(
+            for chunk in client.models.generate_content_stream(
                 model=MODEL, contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.5,
-                    max_output_tokens=3000
-                )
-            )
-            for chunk in stream:
-                if chunk.text:
-                    yield f"data: {json.dumps({'text': chunk.text})}\n\n"
+                config=types.GenerateContentConfig(system_instruction=system, temperature=0.5, max_output_tokens=2000)
+            ):
+                if chunk.text: yield f"data: {json.dumps({'text':chunk.text})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error':str(e)})}\n\n"
+    return Response(stream_with_context(gen()), mimetype="text/event-stream")
 
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
-
+# =============================================================================
+#  ENTRY POINT
+# =============================================================================
 
 if __name__ == "__main__":
     init_db()
-    app.run(debug=True, port=5000)
+    port  = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_ENV") == "development"
+    print(f"\n  Academia Personal → http://localhost:{port}\n")
+    app.run(host="0.0.0.0", port=port, debug=debug)
+else:
+    init_db()
