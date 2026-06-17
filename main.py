@@ -377,7 +377,7 @@ Genera exactamente 12 flashcards. Responde SOLO con JSON:
     try:
         r = client.models.generate_content(
             model=MODEL, contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=4000, response_mime_type="application/json")
+            config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=8000, response_mime_type="application/json")
         )
         return jsonify({"success": True, "flashcards": parse_llm_json(r.text)})
     except Exception as e:
@@ -407,7 +407,7 @@ JSON:
     try:
         r = client.models.generate_content(
             model=MODEL, contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=5000, response_mime_type="application/json")
+            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=10000, response_mime_type="application/json")
         )
         return jsonify({"success": True, "exam": parse_llm_json(r.text)})
     except Exception as e:
