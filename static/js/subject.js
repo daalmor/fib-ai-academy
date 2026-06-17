@@ -462,8 +462,8 @@ function renderResults(result, questions) {
       <div class="result-question__header"><span>Pregunta ${r.question_id}</span><span class="result-score--${c}">${r.score} / ${r.max_score} pts</span></div>
       ${q.question_text?`<div class="result-text" style="margin-bottom:.65rem;color:var(--text)">${renderMarkdown(q.question_text)}</div>`:''}
       <div class="result-label">Tu respuesta</div><div class="result-text">${esc(q.user_answer||'[Sin responder]')}</div>
-      <div class="result-label">Feedback</div><div class="result-text">${esc(r.feedback||'')}</div>
-      ${r.correct_approach?`<div class="result-label">Cómo debería responderse</div><div class="result-text">${esc(r.correct_approach)}</div>`:''}
+      <div class="result-label">Feedback</div><div class="result-text">${renderMarkdown(r.feedback||'')}</div>
+      ${r.correct_approach?`<div class="result-label">Cómo debería responderse</div><div class="result-text">${renderMarkdown(r.correct_approach)}</div>`:''}
     </div>`;
   }).join('');
   document.getElementById('exam-results').classList.remove('hidden');
