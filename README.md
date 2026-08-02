@@ -1,37 +1,106 @@
-# ☁️ AI Personal Academy (FIB Exam Analyzer)
+<div align="center">
 
-[![Live Demo](https://img.shields.io/badge/Demo-Live%20SaaS-0A84FF?style=for-the-badge)](TU_URL_DE_RENDER_AQUI)
+# 🎓 Personal Academy
+### AI-Powered Exam Pattern Analyzer
 
-**AI Personal Academy** is an intelligent learning companion that transforms raw, unstructured historical university exams into a comprehensive, hyper-personalized study platform. 
+Upload past exams. The AI finds the patterns that repeat every year, then generates a cheat sheet, flashcards, and a mock exam calibrated to your professor's actual style.
 
-Built as a continuous value loop, it removes all technical friction for the student: just drag and drop your past papers, and the AI models your professor's testing style in seconds.
+[![Live Demo](https://img.shields.io/badge/demo-live-2ea44f?style=for-the-badge&logo=googlecloud&logoColor=white)](https://academia-fib-846081440727.europe-west1.run.app/)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Flask](https://img.shields.io/badge/Flask-3.1-000000?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
+[![Gemini](https://img.shields.io/badge/Gemini_2.5_Flash-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![Cloud Run](https://img.shields.io/badge/Cloud_Run-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white)](https://cloud.google.com/run)
 
----
+<!-- Replace with a 5-8s GIF of the flow: upload PDFs → Patterns → Cheat Sheet -->
+<!-- <img src="docs/demo.gif" width="800" alt="Personal Academy demo"> -->
 
-## ✨ Core Product Features
-
-* **🔍 Exam Pattern Detection:** Upload your past tests to instantly see exactly which topics have the highest probability of appearing on your next exam, sorted by historical frequency and difficulty.
-* **📝 Dynamic Cheat Sheets:** Get an exhaustive markdown summary of all core concepts, formulas, and step-by-step resolution templates needed to answer exam questions accurately.
-* **🎴 Smart Spaced-Repetition Flashcards:** Study core definitions utilizing an integrated **SM-2 algorithmic progression** that tracks your confidence levels (Easy, Medium, Hard) to optimize active recall.
-* **✍️ Exam Simulator & AI Grading:** Test your knowledge under real exam conditions. The platform generates custom questions based on historical syllabus data, accepts your text inputs, and delivers strict, fair grading out of 10 with granular actionable feedback.
-* **💬 24/7 Contextual AI Tutor:** Stuck on a complex algorithm or recurrence relation? Ask the built-in streaming AI tutor any question to get immediate technical explanations tailored directly to your course guidelines.
-* **📊 Student Telemetry Dashboard:** Track your preparation journey via visual analytics. Monitor your mock exam score evolution and track your flashcard mastery metrics over time.
-
----
-
-## 🛠️ Tech Stack & Systems Architecture
-
-* **Backend Core:** Python / Flask (Asynchronous server-side event streaming configuration for real-time generative chat routing).
-* **AI Engine:** Google GenAI SDK (`gemini-2.5-flash`) utilizing custom system-instruction prompting and structured constraints to enforce strict JSON/LaTeX delivery schemas.
-* **Data Layer:** SQLite relational database mapping historical mock exam results, performance metrics, and multi-user spaced repetition logs.
-* **Frontend Layer:** Built with a premium, accessible Apple Dark Mode aesthetic. Powered by Vanilla JS (ES6+), `marked.js` for robust markdown rendering, `KaTeX` for native mathematical equation execution, and `Chart.js` for student performance analytics.
-* **Distribution & Deployment:** Production-hardened utilizing a Linux-based Gunicorn WSGI gateway deployed natively on Render.
+</div>
 
 ---
 
-## 🚀 Quick Start for Users
+## The problem
 
-1. **Select your Course:** Open the platform in your browser and choose the engineering subject you want to master.
-2. **Upload Past Papers:** Drag and drop your university exam PDFs directly into the interactive dropzone.
-3. **Train the System:** Click on **"Analyze uploaded exams"**. The platform reads the documents in memory, processes the tokens, and instantiates your personalized academy dashboard.
-4. **Iterate & Master:** Practice with the flashcards, take custom mock exams, and watch your grade average move up on the live telemetry graph.
+Studying for an exam at FIB isn't "reviewing the whole syllabus" — every subject has a small, repeating set of exercise patterns the professor reuses year after year. Finding them by hand, skimming 10-15 past PDFs, is exactly the slow, tedious work an LLM can do in seconds once it has the right context.
+
+**Personal Academy automates that analysis.** Upload the exams, the AI extracts the recurring patterns, and everything else — cheat sheet, flashcards, mock exams — gets generated from that.
+
+## What it does
+
+| Module | What it generates |
+|---|---|
+| 🧩 **Patterns** | Automatic detection of recurring exercise types, with frequency, key concept, why it matters, and how it typically shows up in the exam |
+| 📋 **Cheat Sheet** | Structured reference sheet with formulas, definitions and step-by-step methods per pattern — LaTeX rendered |
+| 🗂️ **Flashcards** | Active-recall cards generated directly from the detected patterns, not generic filler |
+| ⏱️ **Mock Exam** | Timed exam with questions calibrated to real difficulty, graded by AI with per-question feedback |
+| 💬 **AI Chat** | Tutor with full context of the subject (patterns + cheat sheet) for quick questions, no need to re-explain from scratch |
+| 📈 **Progress** | Dashboard tracking mock exam scores and per-pattern mastery over time |
+
+## Tech stack
+
+**Backend** — Python / Flask, streaming responses via Server-Sent Events (SSE) so long LLM answers don't block the UI
+**AI** — Gemini 2.5 Flash (`google-genai` SDK) — structured JSON generation for patterns/flashcards/exams, streamed text for chat
+**Storage** — Google Cloud Storage — source PDFs, analysis cache, per-user progress
+**Frontend** — Vanilla JavaScript, `marked.js` for Markdown, `KaTeX` for LaTeX, `Chart.js` for the progress dashboard
+**Infrastructure** — Docker + Gunicorn, deployed on **Google Cloud Run** (autoscaling, managed HTTPS, zero servers to maintain)
+
+## Engineering notes
+
+A few things that didn't work on the first try, and why:
+
+- **Silent JSON truncation.** Gemini 2.5 Flash reserves "thinking" tokens by default, which count against `max_output_tokens`. When generating long lists (12 flashcards), the JSON was getting cut mid-array, and the recovery parser (`json_repair`) silently returned only what had arrived intact — 2 cards instead of 12, with no visible error. Fixed by setting `thinking_budget=0` on structured-output calls.
+- **Prompt contamination.** The chat endpoint was reusing format rules meant for JSON generation, and receiving pattern context as raw JSON. The model would literally respond in JSON when asked to "list the patterns." Split JSON-generation rules (analyze/flashcards/exam) from conversational Markdown rules (chat).
+- **Dark theme contrast bug.** A duplicated CSS block referenced variables that didn't exist in the actual design system, falling back to light-theme defaults — near-black text on a near-black background, invisible. Consolidated into a single source of truth for theme variables.
+
+## Getting started
+
+```bash
+git clone https://github.com/daalmor/fib-ai-academy.git
+cd fib-ai-academy
+python -m venv venv
+venv\Scripts\activate          # Windows
+pip install -r requirements.txt
+```
+
+Create a `.env` file in the project root:
+```
+GOOGLE_API_KEY=your_gemini_api_key
+GCS_BUCKET=your_gcs_bucket_name
+```
+
+```bash
+python main.py
+```
+
+Open `http://localhost:5000`.
+
+## Deployment
+
+```bash
+gcloud run deploy academia-fib \
+  --source . \
+  --region europe-west1 \
+  --allow-unauthenticated \
+  --memory 512Mi \
+  --timeout 300 \
+  --set-env-vars GCS_BUCKET=your_gcs_bucket_name \
+  --set-secrets GOOGLE_API_KEY=GOOGLE_API_KEY:latest
+```
+
+The API key lives in Secret Manager, never as a plaintext environment variable.
+
+## Usage
+
+1. Create a subject and upload past exam PDFs
+2. Hit **Analyze** — the AI detects the recurring patterns automatically
+3. Review with the Cheat Sheet and Flashcards
+4. Test yourself with the timed Mock Exam
+5. Clear up quick questions with the AI Chat
+
+---
+
+<div align="center">
+
+Built by [**Rubén**](https://github.com/daalmor) — Computer Engineering student at FIB (UPC).
+I use this every week to study for my own exams.
+
+</div>
