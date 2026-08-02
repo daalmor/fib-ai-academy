@@ -53,38 +53,38 @@ A few things that didn't work on the first try, and why:
 
 ## Getting started
 
-\`\`\`bash
+```bash
 git clone https://github.com/daalmor/fib-ai-academy.git
 cd fib-ai-academy
 python -m venv venv
 venv\Scripts\activate          # Windows
 pip install -r requirements.txt
-\`\`\`
+```
 
-Create a \`.env\` file in the project root:
-\`\`\`
+Create a `.env` file in the project root:
+```
 GOOGLE_API_KEY=your_gemini_api_key
 GCS_BUCKET=your_gcs_bucket_name
-\`\`\`
+```
 
-\`\`\`bash
+```bash
 python main.py
-\`\`\`
+```
 
-Open \`http://localhost:5000\`.
+Open `http://localhost:5000`.
 
 ## Deployment
 
-\`\`\`bash
-gcloud run deploy academia-fib \\
-  --source . \\
-  --region europe-west1 \\
-  --allow-unauthenticated \\
-  --memory 512Mi \\
-  --timeout 300 \\
-  --set-env-vars GCS_BUCKET=your_gcs_bucket_name \\
+```bash
+gcloud run deploy academia-fib \
+  --source . \
+  --region europe-west1 \
+  --allow-unauthenticated \
+  --memory 512Mi \
+  --timeout 300 \
+  --set-env-vars GCS_BUCKET=your_gcs_bucket_name \
   --set-secrets GOOGLE_API_KEY=GOOGLE_API_KEY:latest
-\`\`\`
+```
 
 The API key lives in Secret Manager, never as a plaintext environment variable.
 
